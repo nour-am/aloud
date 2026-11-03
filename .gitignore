@@ -3,6 +3,7 @@
 # Build outputs and logs
 /build/
 /dist/
+/tests/golden/
 *.log
 *.o
 *.a

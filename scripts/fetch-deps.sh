@@ -48,3 +48,36 @@ if [ ! -f "$TP/ffmpeg/VERSION" ] || [ "$(cat "$TP/ffmpeg/VERSION")" != "$FFMPEG_
   mv "$TP/ffmpeg-$FFMPEG_VERSION" "$TP/ffmpeg"
 fi
 echo "ffmpeg @ $(cat "$TP/ffmpeg/VERSION")"
+
+LITERATA_VERSION=3.103
+LITERATA_SHA256=f7fb973cafb26cf785cbebaeaf51c18f87c15a3bcf4d82a7d4857564db5b056d
+INTER_VERSION=4.1
+INTER_SHA256=9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e
+
+mkdir -p "$TP/fonts"
+if [ ! -f "$TP/fonts/Literata-Regular.ttf" ] || [ ! -f "$TP/fonts/Literata-SemiBold.ttf" ]; then
+  lzip="$TP/literata-$LITERATA_VERSION.zip"
+  [ -f "$lzip" ] || curl -fL --retry 5 --retry-all-errors --connect-timeout 30 \
+    -o "$lzip" "https://github.com/googlefonts/literata/releases/download/$LITERATA_VERSION/$LITERATA_VERSION.zip"
+  echo "$LITERATA_SHA256  $lzip" | shasum -a 256 -c -
+  unzip -q -j -o "$lzip" \
+    "fonts/ttf/Literata-Regular.ttf" \
+    "fonts/ttf/Literata-SemiBold.ttf" \
+    "OFL.txt" -d "$TP/fonts"
+  mv "$TP/fonts/OFL.txt" "$TP/fonts/Literata-OFL.txt"
+fi
+echo "literata @ $LITERATA_VERSION"
+
+if [ ! -f "$TP/fonts/Inter-Regular.ttf" ] || [ ! -f "$TP/fonts/Inter-SemiBold.ttf" ]; then
+  izip="$TP/Inter-$INTER_VERSION.zip"
+  [ -f "$izip" ] || curl -fL --retry 5 --retry-all-errors --connect-timeout 30 \
+    -o "$izip" "https://github.com/rsms/inter/releases/download/v$INTER_VERSION/Inter-$INTER_VERSION.zip"
+  echo "$INTER_SHA256  $izip" | shasum -a 256 -c -
+  unzip -q -j -o "$izip" \
+    "extras/ttf/Inter-Regular.ttf" \
+    "extras/ttf/Inter-SemiBold.ttf" \
+    "LICENSE.txt" -d "$TP/fonts"
+  mv "$TP/fonts/LICENSE.txt" "$TP/fonts/Inter-OFL.txt"
+fi
+echo "inter @ $INTER_VERSION"
+

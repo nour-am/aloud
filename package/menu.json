@@ -1,0 +1,32 @@
+{
+    "items": [
+        {
+            "name": "Aloud Audiobook Player",
+            "priority": 1,
+            "items": [
+                {
+                    "name": "Start Aloud",
+                    "priority": 1,
+                    "action": "/mnt/us/extensions/aloud/aloud.sh",
+                    "exitmenu": true,
+                    "internal": "status Launching Aloud..."
+                },
+                {
+                    "name": "Test Audio & Sleep (10s 440Hz tone)",
+                    "priority": 2,
+                    "action": "/mnt/us/extensions/aloud/bin/aloud",
+                    "params": "--tone-test 10 --helpers /mnt/us/extensions/aloud/bin",
+                    "exitmenu": false,
+                    "internal": "status Playing 10s test tone..."
+                },
+                {
+                    "name": "Save Device Diagnostics (aloud-diagnose.txt)",
+                    "priority": 3,
+                    "action": "/mnt/us/extensions/aloud/bin/kindle-diagnose.sh",
+                    "exitmenu": false,
+                    "internal": "status Writing aloud-diagnose.txt to USB root..."
+                }
+            ]
+        }
+    ]
+}
