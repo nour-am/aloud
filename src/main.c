@@ -460,6 +460,19 @@ static int run_interactive_walkthrough(const char *lib_dir, const char *state_di
     return 0;
 }
 
+/* Present a rect of the UI view canvas, which sits `inset_px` rows below the top of
+ * the real framebuffer canvas (see --top-inset-mm). */
+static void present(Platform *plat, const Canvas *full, const Canvas *view, int inset_px,
+                    AloudRect r, AloudWaveform wfm) {
+    if (r.y <= 0 && r.h >= view->height && inset_px > 0) {
+        /* Full-screen refresh: include the inset strip so flashes clean it too. */
+        r = (AloudRect){0, 0, full->width, full->height};
+    } else {
+        r.y += inset_px;
+    }
+    platform_refresh(plat, full, r, wfm);
+}
+
 int main(int argc, char **argv) {
     const char *library_dir = "/mnt/us/audiobooks";
     bool explicit_lib = false;
@@ -471,6 +484,7 @@ int main(int argc, char **argv) {
     const char *walkthrough_dir = NULL;
     bool tone_test = false;
     int tone_seconds = 10;
+    float top_inset_mm = 0.0f;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--library") == 0 && i + 1 < argc) {
@@ -482,6 +496,11 @@ int main(int argc, char **argv) {
             state_dir = argv[++i];
         } else if (strcmp(argv[i], "--fonts") == 0 && i + 1 < argc) {
             font_dir = argv[++i];
+        } else if (strcmp(argv[i], "--top-inset-mm") == 0 && i + 1 < argc) {
+            /* Reserve a strip at the top when the stock status bar ("pillow") could not
+             * be hidden, so its clock/battery redraws never land on our headers. */
+            top_inset_mm = strtof(argv[++i], NULL);
+            if (!(top_inset_mm >= 0.0f && top_inset_mm <= 20.0f)) top_inset_mm = 0.0f;
         } else if (strcmp(argv[i], "--helpers") == 0 && i + 1 < argc) {
             helper_dir = argv[++i];
         } else if (strcmp(argv[i], "--export-screens") == 0 && i + 1 < argc) {
@@ -555,6 +574,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* The UI renders into a view of the framebuffer canvas that starts inset_px rows
+     * down (rows are contiguous, so this is just a pointer offset). */
+    canvas_clear(&canvas, TONE_WHITE);
+    int inset_px = canvas_mm_to_px(&canvas, top_inset_mm);
+    if (inset_px < 0 || inset_px > canvas.height / 8) inset_px = 0;
+    Canvas view = canvas;
+    view.pixels = canvas.pixels + (size_t)inset_px * (size_t)canvas.width;
+    view.height = canvas.height - inset_px;
+
     Store store;
     store_init(&store);
     (void)store_load(&store, state_dir);
@@ -583,7 +611,7 @@ int main(int argc, char **argv) {
     (void)power_start(&power);
 
     Ui ui;
-    ui_init(&ui, &canvas, ts, &lib, player, platform_has_volume_control(plat));
+    ui_init(&ui, &view, ts, &lib, player, platform_has_volume_control(plat));
     ui_set_storage(&ui, &store, state_dir, library_dir);
 
     /* Prompt the user to choose their audiobook folder on first launch (when no
@@ -595,7 +623,7 @@ int main(int argc, char **argv) {
     AloudRect init_rect;
     AloudWaveform init_wfm;
     ui_render_full(&ui, true, &init_rect, &init_wfm);
-    platform_refresh(plat, &canvas, init_rect, init_wfm);
+    present(plat, &canvas, &view, inset_px, init_rect, init_wfm);
 
     int64_t last_loop_ms = monotonic_ms();
     bool has_been_playing = false;
@@ -678,7 +706,7 @@ int main(int argc, char **argv) {
                 AloudRect r;
                 AloudWaveform w;
                 ui_render_full(&ui, true, &r, &w);
-                platform_refresh(plat, &canvas, r, ALOUD_WFM_GC16_FLASH);
+                present(plat, &canvas, &view, inset_px, r, ALOUD_WFM_GC16_FLASH);
             }
         }
 
@@ -690,16 +718,21 @@ int main(int argc, char **argv) {
             AloudRect r;
             AloudWaveform w;
             if (ui_on_player_tick(&ui, &r, &w)) {
-                platform_refresh(plat, &canvas, r, w);
+                present(plat, &canvas, &view, inset_px, r, w);
             }
         }
 
         AloudInputEvent ev;
         while (platform_poll_event(plat, &ev)) {
+            ev.y -= inset_px;
+            ev.start_y -= inset_px;
+            if (ev.type == ALOUD_EV_TAP && ev.y < 0) {
+                continue; /* tap landed on the status-bar strip */
+            }
             AloudRect r;
             AloudWaveform w;
             if (ui_handle_event(&ui, ev, &r, &w) && !power.in_screensaver) {
-                platform_refresh(plat, &canvas, r, w);
+                present(plat, &canvas, &view, inset_px, r, w);
             }
             if (ui.quit_requested) break;
         }

@@ -40,6 +40,7 @@ fi
 echo "$$" > "$PID_FILE"
 
 MOVED_PASSWD=0
+STOPPED_STATUSBAR=0
 
 cleanup() {
   trap - EXIT INT TERM HUP
@@ -52,6 +53,10 @@ cleanup() {
     lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 >/dev/null 2>&1 || true
     lipc-set-prop -i com.lab126.btfd ensureBTconnection 0 >/dev/null 2>&1 || true
     lipc-set-prop com.lab126.pillow disableEnablePillow enable >/dev/null 2>&1 || true
+  fi
+
+  if [ "$STOPPED_STATUSBAR" -eq 1 ]; then
+    start statusbar >/dev/null 2>&1 || true
   fi
 
   if [ "$MOVED_PASSWD" -eq 1 ] && [ -e "$PASSWD_BAK" ]; then
@@ -86,8 +91,32 @@ if [ -r /dev/fb0 ]; then
   cat /dev/fb0 > "$FB_DUMP" 2>/dev/null || rm -f "$FB_DUMP"
 fi
 
-# 6. Run Aloud (loads user's chosen folder from state/library_dir.txt, or prompts on first run).
+# 6. Hide the stock status bar (clock/battery "pillow") while Aloud owns the screen,
+#    otherwise its periodic redraws land on top of our headers. Same mechanism as
+#    KOReader; cleanup() re-enables it. If hiding fails, Aloud lays out below it.
+#    Users can force a strip height (mm) in state/top_inset_mm.txt.
+#    FW >= 5.17 draws the bar from a separate upstart job (`statusbar`), which must be
+#    stopped as well (RESEARCH.md §3, verified by KOReader on PW4/PW6).
+BAR_HIDDEN=0
+if lipc-set-prop com.lab126.pillow disableEnablePillow disable >/dev/null 2>&1 ||
+   lipc-set-prop com.lab126.pillow interrogatePillow \
+     '{"pillowId": "default_status_bar", "function": "nativeBridge.hideMe();"}' >/dev/null 2>&1; then
+  BAR_HIDDEN=1
+fi
+if [ -f /etc/upstart/statusbar.conf ]; then
+  stop statusbar >/dev/null 2>&1 && STOPPED_STATUSBAR=1
+  if status statusbar 2>/dev/null | grep -q 'stop/'; then BAR_HIDDEN=1; else BAR_HIDDEN=0; fi
+fi
+TOP_INSET_MM=0
+[ "$BAR_HIDDEN" -eq 1 ] || TOP_INSET_MM=6
+if [ -r "$ALOUD_DIR/state/top_inset_mm.txt" ]; then
+  user_inset=$(tr -cd '0-9.' < "$ALOUD_DIR/state/top_inset_mm.txt" 2>/dev/null)
+  [ -n "$user_inset" ] && TOP_INSET_MM="$user_inset"
+fi
+
+# 7. Run Aloud (loads user's chosen folder from state/library_dir.txt, or prompts on first run).
 "$ALOUD_BIN" \
+  --top-inset-mm "$TOP_INSET_MM" \
   --state "$ALOUD_DIR/state" \
   --fonts "$ALOUD_DIR/fonts" \
   --helpers "$ALOUD_DIR/bin" \

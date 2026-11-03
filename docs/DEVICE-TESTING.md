@@ -46,6 +46,7 @@ package (`documents/` or `extensions/aloud/bin/`):
 | Check | Expected Behaviour | Verified |
 |---|---|---|
 | **Launch from Library** | Tapping **Aloud** scriptlet in the Kindle Library opens Aloud cleanly with no statusbar bleed-through orpillow popups. | [ ] |
+| **Status bar hidden** | No clock/battery bar is drawn over the Library or Chapters headers, even after the clock ticks over a minute; it reappears after Exit. If it still shows, put e.g. `6` in `extensions/aloud/state/top_inset_mm.txt` to lay Aloud out below it. | [ ] |
 | **Launch from KUAL** | Launching from KUAL / KUALA / KUAL Next opens Aloud and prevents second-instance launch. | [ ] |
 | **Touch & Rotation** | Taps hit exact buttons in Upright, Upside-Down, and Landscape orientations (including KT4 lift quirk and Oasis page-turn buttons). | [ ] |
 | **Waveform quality** | Play/Pause and minute ticks update with fast non-flashing `DU`; sheets and page flips use `GL16`; cover loads flash cleanly with `GC16`. | [ ] |
