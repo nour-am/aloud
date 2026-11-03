@@ -700,8 +700,14 @@ int main(int argc, char **argv) {
 
         if (power_slot >= 0 && (pfds[power_slot].revents & (POLLIN | POLLHUP))) {
             bool wake_repaint = false;
+            bool was_in_screensaver = power.in_screensaver;
             player_get_snapshot(player, &snap);
             (void)power_handle_readable(&power, snap.playing, snap.sleep_rem_ms, &wake_repaint);
+            if (!was_in_screensaver && power.in_screensaver) {
+                /* Screen just went to sleep: the user may not come back to this session
+                 * (battery dies, reboot), so persist now rather than at the next 60 s tick. */
+                (void)player_save_position_now(player);
+            }
             if (wake_repaint && !power.in_screensaver) {
                 AloudRect r;
                 AloudWaveform w;

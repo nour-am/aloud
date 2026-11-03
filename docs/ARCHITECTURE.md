@@ -182,8 +182,13 @@ frontlight on and reportedly swallows short power-button presses. Aloud instead:
   Key = path relative to the library root.
 - Written atomically: write `positions.tsv.tmp` → `fsync` → `rename` → `fsync(dir)`.
   On load, a missing/corrupt file falls back to `positions.tsv.bak` (previous good copy).
-- Save triggers: pause, seek, chapter change, book switch, sleep-timer stop, exit/signal,
-  and every 60 s while playing. Never more often (flash wear, wakeups).
+- Save triggers: pause, seek, chapter change, book switch, leaving the player, sleep-timer
+  stop, screensaver entry, exit/signal, and every 60 s while playing. Never more often
+  (flash wear, wakeups). Seeks while playing are coalesced and flushed within 2 s.
+- The saved position is what the listener has *heard* (decode position minus the sink's
+  buffered audio), and resuming a reopened book rewinds 2 s like resuming after a pause.
+- The player holds a pointer into the Library's `Book` array, so it unloads its book
+  (saving first) before anything re-sorts or rescans that array.
 - Library cache (`library.tsv`) keyed by path + size + mtime so FFmpeg probing happens
   only for new/changed files; thumbnails as raw 8-bit files named by a hash of the key.
 

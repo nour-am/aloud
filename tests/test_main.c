@@ -127,16 +127,17 @@ static void test_decoder_m4b_and_corrupt(const char *fixture_dir) {
     }
 }
 
-/* Capturing AudioOut: records the first chunk written after a reset so tests can
- * inspect the start-of-playback ramp. */
+/* Capturing AudioOut: records the first 2048 frames written after a reset so tests
+ * can inspect the start-of-playback ramp. */
 static int16_t g_cap_buf[2048 * 2];
 static int g_cap_frames;
 static int cap_write(AudioOut *ao, const int16_t *frames, int n) {
     (void)ao;
-    if (g_cap_frames == 0 && n > 0) {
-        int keep = n < 2048 ? n : 2048;
-        memcpy(g_cap_buf, frames, (size_t)keep * 2 * sizeof(int16_t));
-        g_cap_frames = keep;
+    int keep = 2048 - g_cap_frames;
+    if (keep > n) keep = n;
+    if (keep > 0) {
+        memcpy(g_cap_buf + g_cap_frames * 2, frames, (size_t)keep * 2 * sizeof(int16_t));
+        g_cap_frames += keep;
     }
     return n;
 }
@@ -213,10 +214,15 @@ static void test_library_and_player_engine(const char *fixture_dir) {
         Player *p2 = NULL;
         CHECK(player_create(&p2, &store, state_dir, NULL) == 0, "player_create (ramp test)");
         player_set_sim_audio(p2, cap);
-        CHECK(player_load_book(p2, &lib.books[0]) == 0 && player_seek_book_ms(p2, 3000) == 0 &&
-              player_play(p2) == 0, "ramp test: load, seek 3 s, play");
+        /* Seek after play (play may rewind 2 s) to the exact start of file 2, so the
+         * decoder opens fresh instead of priming an MP3 bit reservoir mid-file. */
+        int64_t f1_start = lib.books[0].files[0].duration_ms;
+        CHECK(player_load_book(p2, &lib.books[0]) == 0 && player_play(p2) == 0 &&
+              player_seek_book_ms(p2, f1_start) == 0, "ramp test: load, play, seek to file 2");
         g_cap_frames = 0;
-        (void)player_step_frames_sync(p2, 2048);
+        for (int i = 0; i < 8 && g_cap_frames < 2048; i++) {
+            (void)player_step_frames_sync(p2, 2048);
+        }
         int peak_late = 0;
         for (int i = 1500 * 2; i < g_cap_frames * 2; i++) {
             int v = abs(g_cap_buf[i]);
@@ -435,6 +441,74 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     CHECK(snap.chapter_pos_ms > (snap.chapter_dur_ms * 60) / 100,
           "scrubber drag jumped to ~75%% of chapter (%lld / %lld ms)",
           (long long)snap.chapter_pos_ms, (long long)snap.chapter_dur_ms);
+
+    /* Position persistence across Library round-trips (regression: Back used to zero
+     * every book's in-memory position and re-sort the Book array under the player). */
+    {
+        ui_set_storage(&ui, &store, state_dir, lib_dir);
+        player_get_snapshot(player, &snap);
+        CHECK(snap.playing && snap.book_pos_ms > 1000, "playing Kindred mid-book before Back");
+        int64_t live_ms = snap.book_pos_ms;
+        char kindred_key[512];
+        snprintf(kindred_key, sizeof(kindred_key), "%s", snap.book->key);
+
+        /* Re-opening the loaded book must keep the live position and keep playing. */
+        CHECK(player_load_book(player, (Book *)snap.book) == 0, "reload same book");
+        player_get_snapshot(player, &snap);
+        CHECK(snap.playing && snap.book_pos_ms == live_ms,
+              "reloading the same book keeps playing at the live position (%lld vs %lld)",
+              (long long)snap.book_pos_ms, (long long)live_ms);
+
+        const StoreEntry *moby_before = store_get(&store, "Moby-Dick.m4b");
+        int64_t moby_ms = moby_before ? moby_before->position_ms : -1;
+        CHECK(moby_ms > 0, "Moby-Dick has a saved position (%lld)", (long long)moby_ms);
+
+        AloudInputEvent tap_back = {
+            .type = ALOUD_EV_TAP,
+            .x = ui.hit_header_left.x + ui.hit_header_left.w / 2,
+            .y = ui.hit_header_left.y + ui.hit_header_left.h / 2
+        };
+        CHECK(ui_handle_event(&ui, tap_back, &rect, &wfm) && ui.screen == UI_SCREEN_LIBRARY,
+              "Back returns to Library");
+
+        int krow = -1, mrow = -1;
+        for (int i = 0; i < (int)lib.count; i++) {
+            if (strcmp(lib.books[i].key, kindred_key) == 0) krow = i;
+            if (strcmp(lib.books[i].key, "Moby-Dick.m4b") == 0) mrow = i;
+        }
+        CHECK(krow >= 0 && mrow >= 0, "both books still listed after Back");
+        CHECK(lib.books[krow].saved_book_pos_ms > live_ms - 1500 &&
+                  lib.books[krow].saved_book_pos_ms <= live_ms,
+              "Library shows Kindred at its live position (%lld vs %lld)",
+              (long long)lib.books[krow].saved_book_pos_ms, (long long)live_ms);
+        CHECK(lib.books[mrow].saved_file_pos_ms == moby_ms,
+              "other books keep their saved position after Back (%lld vs %lld)",
+              (long long)lib.books[mrow].saved_file_pos_ms, (long long)moby_ms);
+        const StoreEntry *moby_after = store_get(&store, "Moby-Dick.m4b");
+        CHECK(moby_after && moby_after->position_ms == moby_ms,
+              "Moby-Dick's stored position is untouched");
+
+        /* Store on disk agrees: reload it fresh. */
+        static Store disk; /* large: keep off the stack */
+        store_init(&disk);
+        CHECK(store_load(&disk, state_dir) == 0, "reload positions.tsv");
+        const StoreEntry *kd = store_get(&disk, kindred_key);
+        CHECK(kd && lib_book_pos_from_file(&lib.books[krow], kd->file_index, kd->position_ms) ==
+                        lib.books[krow].saved_book_pos_ms,
+              "positions.tsv holds Kindred's live position");
+
+        AloudInputEvent tap_k = {
+            .type = ALOUD_EV_TAP,
+            .x = ui.hit_list_rows[krow].x + 100,
+            .y = ui.hit_list_rows[krow].y + 50
+        };
+        CHECK(ui_handle_event(&ui, tap_k, &rect, &wfm) && ui.screen == UI_SCREEN_PLAYER,
+              "reopen Kindred from Library");
+        player_get_snapshot(player, &snap);
+        CHECK(snap.book && strcmp(snap.book->key, kindred_key) == 0 &&
+                  snap.book_pos_ms == lib.books[krow].saved_book_pos_ms,
+              "reopened Kindred at its saved position (%lld)", (long long)snap.book_pos_ms);
+    }
 
     /* Tap Chapters button -> navigates to Chapters screen. */
     AloudInputEvent tap_chaps = {

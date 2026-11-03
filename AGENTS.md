@@ -51,11 +51,16 @@ Done:
   - `src/platform_kindle.c`, `src/platform_sim.c`, `src/main.c`: FBInk + evdev (`EVIOCGRAB`,
     Protocol A & B, KT4 `BTN_TOUCH 0` quirk, axis swap, rotation map, Oasis/Voyage page keys) +
     `poll()` loop (`-1` timeout when paused & idle).
-- 121-check unit & integration test suite (`make test`) + golden screenshot generator
+- 153-check unit & integration test suite (`make test`) + golden screenshot generator
   (`make sim` → `docs/screens/*.png`).
 - Crash-safe Kindle launcher & packaging (`make package` → `dist/aloud-0.1.0.zip`, 1.8 MB) +
   on-device diagnostic & audio smoke-test scripts (`tools/kindle-diagnose.sh`,
   `tools/kindle-audio-test.sh`, `docs/DEVICE-TESTING.md`).
+
+Owner feedback round 1 (stacked local branches, one per item, all tests green):
+`fix/progress-1s-sync` (#1) → `fix/immediate-pause` (#2) → `fix/fast-scrubber-seek` (#3) →
+`fix/playback-start-glitch` (#4) → `fix/status-bar-overlap` (#5) → `fix/position-autosave` (#6).
+Items #3–#6 need confirming on the device (see `docs/DEVICE-TESTING.md`).
 
 Next step (requires physical Kindle hardware):
 - Run through `docs/DEVICE-TESTING.md` on the owner's Kindle(s) and record findings from
@@ -81,7 +86,7 @@ tools/kindle-diagnose.sh   read-only on-device fact finder (scriptlet)
 tools/kindle-audio-test.sh standalone 10 s 440 Hz tone smoke-test scriptlet
 helper/aloud_sink.c     dynamic glibc helper: dlopen libgstreamer-1.0/0.10, fdsrc ! mixersink
 src/                    C11 application modules (store, decoder, library, player, power, ui, platform)
-tests/                  gen_fixtures.sh + test_main.c (121 checks)
+tests/                  gen_fixtures.sh + test_main.c (153 checks)
 package/                launcher.sh, scriptlet.sh, config.xml, menu.json, audiobooks-README.txt
 third_party/ build/ dist/  git-ignored, generated
 ```
@@ -93,7 +98,7 @@ brew install zig            # 0.17.0 verified; Homebrew ffmpeg is used for test 
 ./scripts/fetch-deps.sh     # FBInk, sonic, stb, FFmpeg 9.0.2, Literata 3.103, Inter 4.1
 ./scripts/build-ffmpeg.sh host     # → build/host/ffmpeg/{include,lib}
 ./scripts/build-ffmpeg.sh kindle   # → build/kindle/ffmpeg/{include,lib}  (~3 min)
-make test                   # runs 121 unit & integration checks
+make test                   # runs 153 unit & integration checks
 make sim                    # exports screenshots into docs/screens/
 make package                # builds Kindle binaries and creates dist/aloud-0.1.0.zip
 ```

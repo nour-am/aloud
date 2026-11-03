@@ -85,5 +85,8 @@ int player_step_frames_sync(Player *p, int max_out_frames);
 void player_get_snapshot(Player *p, PlayerSnapshot *snap);
 void player_clear_toast(Player *p);
 int player_save_position_now(Player *p);
+/* Save and drop the current book. Must be called before the Library's Book array is
+ * rebuilt (lib_scan/lib_free), since the player holds a pointer into it. */
+void player_unload_book(Player *p);
 
 #endif /* ALOUD_PLAYER_H */

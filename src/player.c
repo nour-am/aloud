@@ -73,14 +73,33 @@ static void notify_main_locked(Player *p) {
     }
 }
 
+/* Book position the listener has actually heard: the decoder runs ahead of the
+ * speaker by the sink's buffered audio (FIFO + helper queue), so while playing we
+ * subtract that delay. Saving the decode position instead would skip that audio
+ * after a restart. */
+static int64_t heard_book_pos_locked(const Player *p) {
+    int64_t pos = p->book_pos_ms;
+    if (p->playing && !p->just_seeked && p->ao && p->ao->delay_ms) {
+        int64_t delay_book = (p->ao->delay_ms(p->ao) * p->speed_x100) / 100;
+        pos = (pos > delay_book) ? pos - delay_book : 0;
+    }
+    return pos;
+}
+
 static void update_in_memory_position_locked(Player *p) {
     if (!p->book || !p->store) return;
     int64_t epoch = now_epoch_sec();
-    store_set(p->store, p->book->key, p->file_index, p->file_pos_ms,
+    int64_t book_ms = heard_book_pos_locked(p);
+    int file_index = p->file_index;
+    int64_t file_ms = p->file_pos_ms;
+    if (book_ms != p->book_pos_ms) {
+        lib_file_pos_from_book(p->book, book_ms, &file_index, &file_ms);
+    }
+    store_set(p->store, p->book->key, file_index, file_ms,
               p->speed_x100, epoch, p->finished);
-    p->book->saved_file_index = p->file_index;
-    p->book->saved_file_pos_ms = p->file_pos_ms;
-    p->book->saved_book_pos_ms = p->book_pos_ms;
+    p->book->saved_file_index = file_index;
+    p->book->saved_file_pos_ms = file_ms;
+    p->book->saved_book_pos_ms = book_ms;
     p->book->saved_speed_x100 = p->speed_x100;
     p->book->updated_epoch = epoch;
     p->book->finished = p->finished;
@@ -534,13 +553,21 @@ int player_load_book(Player *p, Book *book) {
     if (!p || !book) return -EINVAL;
     pthread_mutex_lock(&p->mu);
 
-    if (p->book && p->book != book) {
-        /* Save previous book before switching (D8). */
+    if (p->book == book) {
+        /* Re-opening the loaded book (e.g. Library -> same row) must not reset the
+         * live position to the last autosave or stop playback. */
+        pthread_mutex_unlock(&p->mu);
+        return 0;
+    }
+    if (p->book) {
+        /* Save previous book before switching (D8), then silence it. */
         save_position_locked(p);
+        if (p->playing && p->ao && p->ao->set_paused) {
+            (void)p->ao->set_paused(p->ao, true);
+        }
     }
 
     p->playing = false;
-    p->paused_once = false;
     p->just_seeked = false;
     p->book = book;
     p->file_index = book->saved_file_index;
@@ -553,6 +580,8 @@ int player_load_book(Player *p, Book *book) {
         p->file_pos_ms = 0;
         p->finished = false;
     }
+    /* Resuming a book after reopening rewinds 2 s, exactly like resuming after a pause. */
+    p->paused_once = (p->file_index > 0 || p->file_pos_ms > 0);
     p->speed_x100 = (book->saved_speed_x100 >= 50 && book->saved_speed_x100 <= 300)
                         ? book->saved_speed_x100
                         : 100;
@@ -655,11 +684,23 @@ int player_pause(Player *p) {
         pthread_mutex_unlock(&p->mu);
         return 0;
     }
+    /* Measure the heard position before set_paused() drains the sink buffers. */
+    int64_t heard = heard_book_pos_locked(p);
     p->playing = false;
     p->paused_once = true;
     p->paused_idle_ms = 0;
     if (p->ao && p->ao->set_paused) {
         (void)p->ao->set_paused(p->ao, true);
+    }
+    if (p->book && heard < p->book_pos_ms) {
+        int fi = p->file_index;
+        int64_t fpos = p->file_pos_ms;
+        lib_file_pos_from_book(p->book, heard, &fi, &fpos);
+        if (fi == p->file_index) {
+            /* Same file: the decoder is reseeked on resume anyway (2 s rewind). */
+            p->file_pos_ms = fpos;
+            p->book_pos_ms = heard;
+        }
     }
     save_position_locked(p);
     pthread_mutex_unlock(&p->mu);
@@ -847,6 +888,29 @@ void player_clear_toast(Player *p) {
     if (!p) return;
     pthread_mutex_lock(&p->mu);
     p->toast[0] = '\0';
+    pthread_mutex_unlock(&p->mu);
+}
+
+void player_unload_book(Player *p) {
+    if (!p) return;
+    pthread_mutex_lock(&p->mu);
+    if (p->book) {
+        if (p->playing && p->ao && p->ao->set_paused) {
+            (void)p->ao->set_paused(p->ao, true);
+        }
+        p->playing = false;
+        save_position_locked(p);
+        if (p->dec) {
+            decoder_close(p->dec);
+            p->dec = NULL;
+        }
+        p->book = NULL;
+        p->book_pos_ms = 0;
+        p->file_pos_ms = 0;
+        p->file_index = 0;
+        p->sleep_mode = SLEEP_OFF;
+        p->sleep_rem_ms = 0;
+    }
     pthread_mutex_unlock(&p->mu);
 }
 

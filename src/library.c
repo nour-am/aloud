@@ -798,7 +798,10 @@ void lib_sync_store(Library *lib, const Store *store) {
     if (!lib) return;
     for (size_t i = 0; i < lib->count; i++) {
         Book *b = &lib->books[i];
-        const StoreEntry *se = store ? store_get(store, b->key) : NULL;
+        if (!store) {
+            continue; /* no store: keep in-memory positions, only re-sort */
+        }
+        const StoreEntry *se = store_get(store, b->key);
         if (se) {
             b->saved_file_index = se->file_index;
             b->saved_file_pos_ms = se->position_ms;

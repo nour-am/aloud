@@ -328,6 +328,9 @@ static void select_library_folder(Ui *ui, const char *chosen_dir) {
         (void)store_set_library_dir(ui->store, ui->state_dir[0] ? ui->state_dir : NULL, chosen_dir);
     }
     if (ui->library) {
+        /* lib_scan frees and rebuilds the Book array the player and cover cache point into. */
+        player_unload_book(ui->player);
+        ui->cached_player_book = NULL;
         (void)lib_scan(ui->library, chosen_dir,
                        ui->state_dir[0] ? ui->state_dir : NULL, ui->store);
     }
@@ -1667,8 +1670,12 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
     /* 4. Player screen taps. */
     if (ui->screen == UI_SCREEN_PLAYER) {
         if (canvas_rect_contains(ui->hit_header_left, tx, ty)) {
+            /* Pause + unload (both persist the position) before re-sorting: the sort
+             * moves Book structs, so the player must not keep a pointer into the array. */
             player_pause(ui->player);
-            lib_sync_store(ui->library, NULL);
+            player_unload_book(ui->player);
+            ui->cached_player_book = NULL;
+            lib_sync_store(ui->library, ui->store);
             ui->screen = UI_SCREEN_LIBRARY;
             ui->lib_page = 0;
             ui_render_full(ui, false, out_rect, out_wfm);
@@ -1699,6 +1706,7 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
             }
             /* Surgical DU refresh on the play/pause button (+ progress if rewind happened). */
             render_play_button_only(ui, snap.playing);
+            ui->last_drawn_second = (int)(snap.book_pos_ms / 1000);
             render_player_progress_block(ui, &snap,
                                          ui->region_progress.x, ui->region_progress.y,
                                          ui->region_progress.w);
