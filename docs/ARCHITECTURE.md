@@ -163,6 +163,18 @@ frontlight on and reportedly swallows short power-button presses. Aloud instead:
   plus our own "screen off" (frontlight to 0 and a static now-playing screen), restored on
   any touch. This is the first thing to test on hardware.
 
+**Pause, seek and latency (owner feedback, 2026-11-03).** `mixersink` hands PCM to the
+Lab126 mixer daemon, which buffers seconds of audio beyond anything Aloud controls, so
+draining our FIFO alone left a ~5 s pause delay. Pause therefore sets the helper's
+pipeline to `PAUSED` (PLAYING↔PAUSED never needs filesrc's stream lock; this is how
+KinAMP pauses). Buffered audio cannot be dropped in place, so a seek (including the 2 s
+rewind on resume) silences the old helper and the audio thread starts a fresh one on its
+next write; the old one gets EOF and `STOP`, pauses and goes to `NULL`, with a 1 s
+`alarm()` as backstop, and is reaped without blocking. The sink delay used for the
+on-screen and saved position is measured (`written − POS`, once a second) and logged
+once per helper start in `aloud.log`; if POS is unusable it falls back to FIFO bytes +
+queue estimate.
+
 ## D7. Threads and event loop
 
 - **Main thread:** `poll()` on the touch/button evdev fds, a self-pipe for audio-thread

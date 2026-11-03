@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -129,6 +130,10 @@ int main(int argc, char **argv) {
     int status_fd = -1;
     int tone_seconds = 0;
     const char *fifo_path = NULL;
+
+    /* The parent closes the status pipe as soon as it sends STOP; a late reply must
+     * not kill us (SIGPIPE) before the pipeline is torn down cleanly. */
+    signal(SIGPIPE, SIG_IGN);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--ctrl-fd") == 0 && i + 1 < argc) {
@@ -254,14 +259,18 @@ int main(int argc, char **argv) {
             char *nl;
             while ((nl = strchr(cmd_buf, '\n')) != NULL) {
                 *nl = '\0';
-                if (strcmp(cmd_buf, "PAUSE") == 0 ||
-                    strcmp(cmd_buf, "PLAY") == 0 ||
-                    strcmp(cmd_buf, "FLUSH") == 0) {
-                    /* Note: Do NOT call gst_element_set_state(PAUSED/READY) on a pipeline
-                     * fed by blocking filesrc location=/dev/stdin, because filesrc holds
-                     * the GStreamer pad stream lock while blocked in read(0) and state
-                     * transitions deadlock waiting for that lock. Stopping PCM writes on
-                     * the parent side naturally idles mixersink. */
+                if (strcmp(cmd_buf, "PAUSE") == 0 || strcmp(cmd_buf, "PLAY") == 0) {
+                    /* mixersink hands audio to Lab126's mixer daemon, which buffers
+                     * seconds of it; only pausing the pipeline stops that playout at
+                     * once. PLAYING<->PAUSED never needs filesrc's stream lock (only
+                     * READY/NULL do), and it is exactly how KinAMP pauses on device
+                     * (RESEARCH.md §6.3). The call returns ASYNC without blocking. */
+                    (void)p_set_state(pipeline, strcmp(cmd_buf, "PAUSE") == 0
+                                                    ? GST_STATE_PAUSED : GST_STATE_PLAYING);
+                    write_status(status_fd, "OK\n");
+                } else if (strcmp(cmd_buf, "FLUSH") == 0) {
+                    /* Buffered mixer audio cannot be dropped in place; the parent flushes
+                     * by stopping this helper and starting a fresh pipeline. */
                     write_status(status_fd, "OK\n");
                 } else if (strcmp(cmd_buf, "POS") == 0) {
                     int64_t pos_ns = 0;
@@ -293,7 +302,12 @@ int main(int argc, char **argv) {
 
     (void)p_get_state;
     (void)p_unref;
-    /* Exit immediately so gst_element_set_state(NULL) cannot hang waiting on
-     * filesrc read(0) or mixersink IPC teardown. */
+    /* Silence first, then tear down so mixersink closes its mixer stream cleanly
+     * (otherwise the daemon may keep playing what it buffered). The parent closes the
+     * PCM writer before STOP, so filesrc sees EOF and NULL cannot block on read();
+     * the alarm is a backstop in case mixersink IPC teardown hangs. */
+    alarm(1);
+    (void)p_set_state(pipeline, GST_STATE_PAUSED);
+    (void)p_set_state(pipeline, GST_STATE_NULL);
     _exit(0);
 }

@@ -578,6 +578,77 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     lib_free(&lib);
 }
 
+/* GStreamer backend process handling, using a fake `aloud-sink` that consumes the
+ * FIFO and logs every command. Verifies pause really reaches the helper, seeks
+ * (flush) replace the helper on the next write, and nothing hangs or leaks. */
+static int count_lines_with(const char *path, const char *needle) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    char line[256];
+    int n = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, needle)) n++;
+    }
+    fclose(fp);
+    return n;
+}
+
+static void test_gst_backend_with_fake_helper(const char *fixture_dir) {
+    char dir[1024], helper[1100], logp[1100];
+    snprintf(dir, sizeof(dir), "%s/tmp/fakehelper", fixture_dir);
+    mkdir(dir, 0755);
+    snprintf(helper, sizeof(helper), "%s/aloud-sink", dir);
+    snprintf(logp, sizeof(logp), "%s/log.txt", dir);
+    remove(logp);
+    FILE *fp = fopen(helper, "w");
+    CHECK(fp != NULL, "write fake helper");
+    fprintf(fp,
+            "#!/bin/bash\n"
+            "trap '' PIPE\n"
+            "LOG='%s'\n"
+            "while [ $# -gt 0 ]; do case $1 in --fifo) F=$2; shift;; --ctrl-fd) C=$2; shift;;"
+            " --status-fd) S=$2; shift;; esac; shift; done\n"
+            "echo START >> \"$LOG\"\n"
+            "cat \"$F\" > /dev/null & CAT=$!\n"
+            "echo OK >&$S\n"
+            "while read -r line <&$C; do echo \"$line\" >> \"$LOG\";\n"
+            "  case $line in POS) echo 'POS 0' >&$S;; STOP) break;; *) echo OK >&$S;; esac\n"
+            "done\n"
+            "kill $CAT 2>/dev/null; echo EXIT >> \"$LOG\"\n",
+            logp);
+    fclose(fp);
+    chmod(helper, 0755);
+
+    AudioOut *ao = NULL;
+    char err[256] = {0};
+    CHECK(audio_out_open_gst(&ao, dir, err, sizeof(err)) == 0 && ao, "open gst backend (%s)", err);
+    static int16_t pcm[4096 * 2];
+    for (int i = 0; i < 20; i++) {
+        CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write PCM to helper");
+    }
+    CHECK(ao->set_paused(ao, true) == 0, "pause");
+    usleep(150000);
+    CHECK(count_lines_with(logp, "PAUSE") == 1, "pause is sent to the helper");
+    CHECK(ao->set_paused(ao, false) == 0, "resume");
+
+    /* Seek: flush silences the old helper; the next write starts a new one. */
+    CHECK(ao->flush(ao) == 0, "flush");
+    CHECK(ao->set_paused(ao, false) == 0, "resume during pending restart is a no-op");
+    CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write after flush");
+    usleep(300000);
+    CHECK(count_lines_with(logp, "START") == 2, "flush replaced the helper (starts=%d)",
+          count_lines_with(logp, "START"));
+    CHECK(count_lines_with(logp, "STOP") == 1 && count_lines_with(logp, "EXIT") == 1,
+          "old helper was stopped and exited");
+    (void)ao->delay_ms(ao);
+
+    audio_out_close(ao);
+    usleep(200000);
+    CHECK(count_lines_with(logp, "EXIT") == 2, "close stops the current helper");
+    struct stat st;
+    CHECK(stat("/tmp/aloud_audio.fifo", &st) != 0, "FIFO removed on close");
+}
+
 int main(int argc, char **argv) {
     const char *fixture_dir = (argc > 1) ? argv[1] : "build/test-fixtures";
     const char *font_dir = (argc > 2) ? argv[2] : "third_party/fonts";
@@ -587,6 +658,7 @@ int main(int argc, char **argv) {
     test_decoder_m4b_and_corrupt(fixture_dir);
     test_library_and_player_engine(fixture_dir);
     test_power_and_touch_decoders();
+    test_gst_backend_with_fake_helper(fixture_dir);
     test_ui_and_golden_screens(fixture_dir, font_dir);
 
     if (g_tests_failed > 0) {

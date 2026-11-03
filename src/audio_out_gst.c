@@ -6,7 +6,9 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,9 +47,48 @@ typedef struct {
     int ctrl_fd;
     int status_fd;
     char fifo_path[64];
-    int64_t frames_written;
+    int64_t frames_written;  /* since this helper started (includes pre-roll) */
     bool paused;
+    char helper_dir[512];
+    int64_t measured_delay_ms; /* -1 = unknown */
+    int64_t delay_checked_ms;  /* monotonic time of the last POS query */
+    bool delay_logged;
+    bool have_helper;
+    char helper_path[1024];
+    atomic_bool needs_restart; /* set by flush (UI thread), acted on by the writer */
+    /* Serialises helper restarts (audio thread) against control traffic and FIFO
+     * draining (UI thread): the writer itself is the only thread replacing pcm_fd. */
+    pthread_mutex_t ctrl_mu;
 } GstAudioImpl;
+
+/* Stopped helpers are reaped without blocking the UI thread (see gst_teardown_child). */
+static pid_t g_pending_reap[8];
+
+static void reap_pending_nonblocking(void) {
+    for (int i = 0; i < 8; i++) {
+        if (g_pending_reap[i] > 0 && waitpid(g_pending_reap[i], NULL, WNOHANG) != 0) {
+            g_pending_reap[i] = 0;
+        }
+    }
+}
+
+static void add_pending_reap(pid_t pid) {
+    reap_pending_nonblocking();
+    for (int i = 0; i < 8; i++) {
+        if (g_pending_reap[i] <= 0) {
+            g_pending_reap[i] = pid;
+            return;
+        }
+    }
+    kill(pid, SIGKILL); /* table full: never leak, never block */
+    (void)waitpid(pid, NULL, 0);
+}
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static void close_inherited_fds_except(int keep1, int keep2) {
     for (int fd = 3; fd < 64; fd++) {
@@ -185,45 +226,14 @@ static void try_wake_bt_nonblocking(void) {
     }
 }
 
-static int gst_write_s16le(AudioOut *ao, const int16_t *frames, int frame_count) {
-    if (!ao || !ao->impl || !frames || frame_count < 0) return -EINVAL;
-    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
-    if (frame_count == 0) return 0;
-
-    const uint8_t *ptr = (const uint8_t *)frames;
-    size_t remaining = (size_t)frame_count * DECODER_OUT_CHANNELS * sizeof(int16_t);
-    int stall_polls = 0;
-    while (remaining > 0) {
-        ssize_t n = write(im->pcm_fd, ptr, remaining);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct pollfd pfd = {.fd = im->pcm_fd, .events = POLLOUT};
-                int pr = poll(&pfd, 1, 200);
-                if (pr > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
-                    return -EPIPE;
-                }
-                if (pr == 0) {
-                    if (++stall_polls >= 8) {
-                        /* Pipe buffer stayed full for > 1.6 s: mixersink is not draining
-                         * (e.g. Bluetooth headphones not connected). Fail cleanly! */
-                        return -ENOTCONN;
-                    }
-                }
-                continue;
-            }
-            return -errno;
-        }
-        stall_polls = 0;
-        ptr += n;
-        remaining -= (size_t)n;
-    }
-    im->frames_written += frame_count;
-    return frame_count;
-}
-
 static int send_ctrl_cmd(GstAudioImpl *im, const char *cmd, char *reply, size_t reply_cap) {
     if (im->ctrl_fd < 0) return -ENOTSUP;
+    if (im->status_fd >= 0) {
+        /* Discard replies that arrived after an earlier command's 80 ms wait. */
+        char stale[64];
+        while (read(im->status_fd, stale, sizeof(stale)) > 0) {
+        }
+    }
     size_t len = strlen(cmd);
     if (write(im->ctrl_fd, cmd, len) != (ssize_t)len) {
         return -EIO;
@@ -248,90 +258,79 @@ static void drain_fifo_nonblocking(int fd) {
     }
 }
 
-static int gst_set_paused(AudioOut *ao, bool paused) {
-    if (!ao || !ao->impl) return -EINVAL;
-    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
-    if (im->paused == paused) return 0;
-    im->paused = paused;
-    if (paused) {
-        /* Drain any unconsumed PCM bytes sitting in the FIFO immediately so
-         * GStreamer cannot keep playing 4-5 seconds of buffered pipe audio. */
-        if (im->fifo_path[0]) {
-            drain_fifo_nonblocking(im->pcm_fd);
+
+/* Write raw PCM into the current helper's pipe. Only the audio thread calls this. */
+static int write_pcm(GstAudioImpl *im, const int16_t *frames, int frame_count) {
+    const uint8_t *ptr = (const uint8_t *)frames;
+    size_t remaining = (size_t)frame_count * DECODER_OUT_CHANNELS * sizeof(int16_t);
+    int stall_polls = 0;
+    while (remaining > 0) {
+        if (atomic_load(&im->needs_restart)) {
+            return frame_count; /* flushed mid-chunk: the rest is stale audio anyway */
         }
+        ssize_t n = write(im->pcm_fd, ptr, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = {.fd = im->pcm_fd, .events = POLLOUT};
+                int pr = poll(&pfd, 1, 200);
+                if (pr > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                    return -EPIPE;
+                }
+                if (pr == 0 && ++stall_polls >= 8) {
+                    /* Pipe stayed full for > 1.6 s: mixersink is not draining
+                     * (e.g. Bluetooth headphones not connected). Fail cleanly. */
+                    return -ENOTCONN;
+                }
+                continue;
+            }
+            return -errno;
+        }
+        stall_polls = 0;
+        ptr += n;
+        remaining -= (size_t)n;
     }
-    char reply[64];
-    (void)send_ctrl_cmd(im, paused ? "PAUSE\n" : "PLAY\n", reply, sizeof(reply));
-    return 0;
+    im->frames_written += frame_count;
+    return frame_count;
 }
 
-static int gst_flush(AudioOut *ao) {
-    if (!ao || !ao->impl) return -EINVAL;
-    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+/* Stop the current helper without waiting for it: close our PCM writer so its
+ * filesrc sees EOF, then STOP, on which it pauses and tears its mixer stream down.
+ * Caller holds ctrl_mu (or is the only thread left). */
+static void gst_teardown_child(GstAudioImpl *im) {
+    if (im->pcm_fd >= 0) {
+        if (im->fifo_path[0]) drain_fifo_nonblocking(im->pcm_fd);
+        close(im->pcm_fd);
+        im->pcm_fd = -1;
+    }
+    if (im->ctrl_fd >= 0) {
+        (void)write(im->ctrl_fd, "STOP\n", 5);
+        close(im->ctrl_fd);
+        im->ctrl_fd = -1;
+    }
+    if (im->status_fd >= 0) {
+        close(im->status_fd);
+        im->status_fd = -1;
+    }
+    if (im->pid > 0) {
+        add_pending_reap(im->pid);
+        im->pid = 0;
+    }
     if (im->fifo_path[0]) {
-        drain_fifo_nonblocking(im->pcm_fd);
+        unlink(im->fifo_path);
+        im->fifo_path[0] = '\0';
     }
-    char reply[64];
-    (void)send_ctrl_cmd(im, "FLUSH\n", reply, sizeof(reply));
-    return 0;
+    im->paused = false;
+    im->frames_written = 0;
+    im->measured_delay_ms = -1;
+    im->delay_checked_ms = 0;
 }
 
-static int64_t gst_delay_ms(AudioOut *ao) {
-    if (!ao || !ao->impl) return GST_QUEUE_MS;
-    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
-    /* Bytes still sitting in the FIFO are exact and cost one ioctl (called once per
-     * second from the UI thread); add the helper queue estimate on top. */
-    int queued = 0;
-    if (im->fifo_path[0] && ioctl(im->pcm_fd, FIONREAD, &queued) == 0 && queued > 0) {
-        int bytes_per_sec = DECODER_OUT_RATE * DECODER_OUT_CHANNELS * (int)sizeof(int16_t);
-        return GST_QUEUE_MS + ((int64_t)queued * 1000) / bytes_per_sec;
-    }
-    return GST_QUEUE_MS + (im->fifo_path[0] ? 0 : 50);
-}
-
-static void gst_close(AudioOut *ao) {
-    if (!ao) return;
-    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
-    if (im) {
-        if (im->fifo_path[0] && im->pcm_fd >= 0) {
-            drain_fifo_nonblocking(im->pcm_fd);
-        }
-        if (im->ctrl_fd >= 0) {
-            (void)write(im->ctrl_fd, "STOP\n", 5);
-            close(im->ctrl_fd);
-        }
-        if (im->pcm_fd >= 0) close(im->pcm_fd);
-        if (im->status_fd >= 0) close(im->status_fd);
-        if (im->pid > 0) {
-            reap_child_bounded(im->pid, 60);
-        }
-        if (im->fifo_path[0]) {
-            unlink(im->fifo_path);
-        }
-        free(im);
-    }
-    free(ao);
-}
-
-int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, size_t err_cap) {
-    if (!out) return -EINVAL;
-    *out = NULL;
-    if (err_msg && err_cap > 0) err_msg[0] = '\0';
-
-    try_wake_bt_nonblocking();
-
-    /* Pick armhf vs armel helper using KOReader's ld-linux-armhf.so.3 check (D6). */
-    bool is_armhf = (access("/lib/ld-linux-armhf.so.3", F_OK) == 0);
-    const char *dir = (helper_dir && helper_dir[0]) ? helper_dir : "/mnt/us/extensions/aloud/bin";
-
-    char helper_path[1024];
-    snprintf(helper_path, sizeof(helper_path), "%s/%s",
-             dir, is_armhf ? "aloud-sink-armhf" : "aloud-sink-armel");
-    bool have_helper = (access(helper_path, X_OK) == 0);
-    if (!have_helper) {
-        snprintf(helper_path, sizeof(helper_path), "%s/aloud-sink", dir);
-        have_helper = (access(helper_path, X_OK) == 0);
-    }
+/* Start a helper (or gst-launch fallback) and fill im's pid/fds. */
+static int gst_spawn(GstAudioImpl *im, char *err_msg, size_t err_cap) {
+    reap_pending_nonblocking();
+    bool have_helper = im->have_helper;
+    const char *helper_path = im->helper_path;
 
     /* Create a real named FIFO in /tmp so GStreamer's `filesrc location=...`
      * sees a proper FIFO filesystem node (verified in LARK/KinAmp on Kindle).
@@ -367,10 +366,11 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     int status_pipe[2] = {-1, -1};
     if (have_helper) {
         if (pipe(ctrl_pipe) != 0 || pipe(status_pipe) != 0) {
+            int err = errno;
             if (use_fifo) { close(pcm_fd); unlink(fifo_path); }
             else { close(pcm_pipe[0]); close(pcm_pipe[1]); }
             if (ctrl_pipe[0] >= 0) { close(ctrl_pipe[0]); close(ctrl_pipe[1]); }
-            return -errno;
+            return -err;
         }
     }
 
@@ -447,26 +447,19 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
         if (sfl >= 0) (void)fcntl(status_pipe[0], F_SETFL, sfl | O_NONBLOCK);
     }
 
-    AudioOut *ao = calloc(1, sizeof(*ao));
-    GstAudioImpl *im = calloc(1, sizeof(*im));
-    if (!ao || !im) {
-        free(ao);
-        free(im);
-        close(pcm_fd);
-        if (use_fifo) unlink(fifo_path);
-        if (ctrl_pipe[1] >= 0) close(ctrl_pipe[1]);
-        if (status_pipe[0] >= 0) close(status_pipe[0]);
-        reap_child_bounded(pid, 40);
-        return -ENOMEM;
-    }
-
     im->pid = pid;
     im->pcm_fd = pcm_fd;
     im->ctrl_fd = have_helper ? ctrl_pipe[1] : -1;
     im->status_fd = have_helper ? status_pipe[0] : -1;
+    im->fifo_path[0] = '\0';
     if (use_fifo) {
         snprintf(im->fifo_path, sizeof(im->fifo_path), "%s", fifo_path);
     }
+    im->paused = false;
+    im->frames_written = 0;
+    im->measured_delay_ms = -1;
+    im->delay_checked_ms = 0;
+    im->delay_logged = false;
 
     /* If using the helper, wait briefly (max 400 ms) for its READY/OK banner so we
      * detect missing GStreamer or broken mixersink immediately. */
@@ -479,12 +472,172 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
                 if (err_msg && err_cap > 0) {
                     snprintf(err_msg, err_cap, "Connect Bluetooth headphones in Kindle Settings");
                 }
-                ao->impl = im;
-                ao->close = gst_close;
-                gst_close(ao);
+                gst_teardown_child(im);
                 return -EIO;
             }
         }
+    }
+
+    /* Pre-roll ~120 ms of silence: mixersink/A2DP start-up (stream setup, clock slaving,
+     * first underrun) then lands on silence instead of clipping the first syllable. */
+    static const int16_t zeros[1024 * DECODER_OUT_CHANNELS];
+    for (int left = (DECODER_OUT_RATE * 120) / 1000; left > 0; left -= 1024) {
+        if (write_pcm(im, zeros, left < 1024 ? left : 1024) < 0) break;
+    }
+    return 0;
+}
+
+static int gst_write_s16le(AudioOut *ao, const int16_t *frames, int frame_count) {
+    if (!ao || !ao->impl || !frames || frame_count < 0) return -EINVAL;
+    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    if (frame_count == 0) return 0;
+
+    if (atomic_load(&im->needs_restart)) {
+        /* A seek flushed the sink: replace the helper so none of the audio the mixer
+         * daemon buffered for the old position is ever heard. Runs on the audio
+         * thread, so the UI never waits for the ~0.3 s helper start. */
+        pthread_mutex_lock(&im->ctrl_mu);
+        atomic_store(&im->needs_restart, false);
+        gst_teardown_child(im);
+        int rc = gst_spawn(im, NULL, 0);
+        pthread_mutex_unlock(&im->ctrl_mu);
+        if (rc < 0) return rc;
+    }
+    if (im->pcm_fd < 0) return -EPIPE;
+    return write_pcm(im, frames, frame_count);
+}
+
+static int gst_set_paused(AudioOut *ao, bool paused) {
+    if (!ao || !ao->impl) return -EINVAL;
+    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    pthread_mutex_lock(&im->ctrl_mu);
+    if (atomic_load(&im->needs_restart) || im->paused == paused) {
+        /* Pending restart: the old helper is already silenced, the new one starts
+         * playing on the next write. */
+        pthread_mutex_unlock(&im->ctrl_mu);
+        return 0;
+    }
+    im->paused = paused;
+    if (paused && im->fifo_path[0]) {
+        drain_fifo_nonblocking(im->pcm_fd);
+    }
+    char reply[64];
+    (void)send_ctrl_cmd(im, paused ? "PAUSE\n" : "PLAY\n", reply, sizeof(reply));
+    pthread_mutex_unlock(&im->ctrl_mu);
+    return 0;
+}
+
+static int gst_flush(AudioOut *ao) {
+    if (!ao || !ao->impl) return -EINVAL;
+    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    pthread_mutex_lock(&im->ctrl_mu);
+    if (!atomic_load(&im->needs_restart)) {
+        /* Silence the old pipeline now; the writer replaces it on the next chunk. */
+        if (!im->paused && im->ctrl_fd >= 0) {
+            char reply[64];
+            (void)send_ctrl_cmd(im, "PAUSE\n", reply, sizeof(reply));
+        }
+        if (im->fifo_path[0]) {
+            drain_fifo_nonblocking(im->pcm_fd);
+        }
+        atomic_store(&im->needs_restart, true);
+    }
+    pthread_mutex_unlock(&im->ctrl_mu);
+    return 0;
+}
+
+static int64_t gst_delay_ms(AudioOut *ao) {
+    if (!ao || !ao->impl) return GST_QUEUE_MS;
+    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    if (pthread_mutex_trylock(&im->ctrl_mu) != 0) {
+        return GST_QUEUE_MS; /* helper restarting: nothing meaningful buffered */
+    }
+    int64_t now = mono_ms();
+    if (im->ctrl_fd >= 0 && !im->paused && !atomic_load(&im->needs_restart) &&
+        now - im->delay_checked_ms >= 1000) {
+        /* Ask the pipeline what it has played; everything written beyond that is still
+         * buffered (FIFO + queue + mixer daemon). At most one round-trip per second. */
+        im->delay_checked_ms = now;
+        char reply[64] = {0};
+        int64_t pos_ms = 0;
+        if (send_ctrl_cmd(im, "POS\n", reply, sizeof(reply)) == 0 &&
+            sscanf(reply, "POS %" SCNd64, &pos_ms) == 1 && pos_ms > 0) {
+            int64_t written_ms = (im->frames_written * 1000) / DECODER_OUT_RATE;
+            int64_t d = written_ms - pos_ms;
+            im->measured_delay_ms = (d >= 0 && d <= 10000) ? d : -1;
+            if (!im->delay_logged) {
+                /* One line per helper start: on-device evidence of real sink latency. */
+                fprintf(stderr, "aloud: sink delay written=%" PRId64 " ms played=%" PRId64
+                                " ms -> %" PRId64 " ms\n", written_ms, pos_ms, d);
+                im->delay_logged = true;
+            }
+        }
+    }
+    int64_t result = im->measured_delay_ms;
+    if (result < 0) {
+        /* Fallback: bytes still in the FIFO are exact; add the helper queue estimate. */
+        int queued = 0;
+        result = GST_QUEUE_MS;
+        if (im->fifo_path[0] && ioctl(im->pcm_fd, FIONREAD, &queued) == 0 && queued > 0) {
+            int bytes_per_sec = DECODER_OUT_RATE * DECODER_OUT_CHANNELS * (int)sizeof(int16_t);
+            result += ((int64_t)queued * 1000) / bytes_per_sec;
+        }
+    }
+    pthread_mutex_unlock(&im->ctrl_mu);
+    return result;
+}
+
+static void gst_close(AudioOut *ao) {
+    if (!ao) return;
+    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    if (im) {
+        gst_teardown_child(im);
+        /* Give stopped helpers a moment to close their mixer streams, then make sure
+         * none outlives us. Close happens only when idle or exiting. */
+        for (int i = 0; i < 8; i++) {
+            if (g_pending_reap[i] > 0) {
+                reap_child_bounded(g_pending_reap[i], 300);
+                g_pending_reap[i] = 0;
+            }
+        }
+        pthread_mutex_destroy(&im->ctrl_mu);
+        free(im);
+    }
+    free(ao);
+}
+
+int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, size_t err_cap) {
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (err_msg && err_cap > 0) err_msg[0] = '\0';
+
+    try_wake_bt_nonblocking();
+
+    AudioOut *ao = calloc(1, sizeof(*ao));
+    GstAudioImpl *im = calloc(1, sizeof(*im));
+    if (!ao || !im) {
+        free(ao);
+        free(im);
+        return -ENOMEM;
+    }
+    im->pid = 0;
+    im->pcm_fd = -1;
+    im->ctrl_fd = -1;
+    im->status_fd = -1;
+    im->measured_delay_ms = -1;
+    atomic_init(&im->needs_restart, false);
+    pthread_mutex_init(&im->ctrl_mu, NULL);
+
+    /* Pick armhf vs armel helper using KOReader's ld-linux-armhf.so.3 check (D6). */
+    bool is_armhf = (access("/lib/ld-linux-armhf.so.3", F_OK) == 0);
+    const char *dir = (helper_dir && helper_dir[0]) ? helper_dir : "/mnt/us/extensions/aloud/bin";
+    snprintf(im->helper_dir, sizeof(im->helper_dir), "%s", dir);
+    snprintf(im->helper_path, sizeof(im->helper_path), "%s/%s",
+             dir, is_armhf ? "aloud-sink-armhf" : "aloud-sink-armel");
+    im->have_helper = (access(im->helper_path, X_OK) == 0);
+    if (!im->have_helper) {
+        snprintf(im->helper_path, sizeof(im->helper_path), "%s/aloud-sink", dir);
+        im->have_helper = (access(im->helper_path, X_OK) == 0);
     }
 
     ao->type = AUDIO_BACKEND_KINDLE_GST;
@@ -495,13 +648,11 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     ao->delay_ms = gst_delay_ms;
     ao->close = gst_close;
 
-    /* Pre-roll ~120 ms of silence: mixersink/A2DP start-up (stream setup, clock slaving,
-     * first underrun) then lands on silence instead of clipping the first syllable. */
-    static const int16_t zeros[1024 * DECODER_OUT_CHANNELS];
-    for (int left = (DECODER_OUT_RATE * 120) / 1000; left > 0; left -= 1024) {
-        if (gst_write_s16le(ao, zeros, left < 1024 ? left : 1024) < 0) break;
+    int rc = gst_spawn(im, err_msg, err_cap);
+    if (rc < 0) {
+        gst_close(ao);
+        return rc;
     }
-
     *out = ao;
     return 0;
 }
