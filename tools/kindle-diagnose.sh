@@ -2,7 +2,8 @@
 # Name: Aloud diagnostics
 # Author: Aloud
 #
-# Read-only fact-finding for Aloud development. Changes nothing on the device.
+# Fact-finding for Aloud development. Changes nothing on the device (it only plays a
+# 1 s quiet test tone through the Aloud helper, from a /var/tmp copy).
 # Use: copy to the Kindle's documents/ folder and open it from the library
 # (scriptlet), or run it from kterm/SSH. Writes aloud-diagnose.txt to the USB root.
 # Serial numbers and Bluetooth MAC addresses are masked before writing.
@@ -40,6 +41,21 @@ mask_macs() { sed -E 's/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/XX:XX:XX:XX:XX:XX/
   for b in gst-inspect-1.0 gst-inspect-0.10 gst-inspect; do
     command -v "$b" >/dev/null 2>&1 && { run "$b"; run "$b" mixersink; run "$b" fdsrc; break; }
   done
+
+  section "Aloud audio helper"
+  run mount
+  AB=/mnt/us/extensions/aloud/bin
+  run ls -la "$AB" /var/tmp/aloud-helpers
+  for h in aloud-sink-armhf aloud-sink-armel; do
+    [ -e "$AB/$h" ] || continue
+    # Runs the helper's 1 s quiet test tone: proves whether it can exec and start mixersink.
+    run "$AB/$h" --tone 1
+    if mkdir -p /var/tmp/aloud-diag 2>/dev/null && cp -f "$AB/$h" /var/tmp/aloud-diag/ &&
+       chmod 755 "/var/tmp/aloud-diag/$h"; then
+      run "/var/tmp/aloud-diag/$h" --tone 1
+    fi
+  done
+  run tail -n 40 /mnt/us/extensions/aloud/state/aloud.log
 
   section "ALSA"
   show /proc/asound/cards /proc/asound/pcm /etc/asound.conf /etc/audio/volume

@@ -647,6 +647,21 @@ static void test_gst_backend_with_fake_helper(const char *fixture_dir) {
     CHECK(count_lines_with(logp, "EXIT") == 2, "close stops the current helper");
     struct stat st;
     CHECK(stat("/tmp/aloud_audio.fifo", &st) != 0, "FIFO removed on close");
+
+    /* Helper present but not executable as a program (what we saw on device): the
+     * backend must notice the gst-launch fallback, and pause/flush/close must still
+     * work and never hang. */
+    fp = fopen(helper, "w");
+    CHECK(fp != NULL, "write broken helper");
+    fputs("\x7f" "ELF-not-really", fp);
+    fclose(fp);
+    chmod(helper, 0755);
+    ao = NULL;
+    CHECK(audio_out_open_gst(&ao, dir, err, sizeof(err)) == 0 && ao, "open with broken helper");
+    CHECK(ao->set_paused(ao, true) == 0 && ao->flush(ao) == 0 && ao->set_paused(ao, false) == 0,
+          "pause/flush/resume on fallback path");
+    audio_out_close(ao);
+    CHECK(stat("/tmp/aloud_audio.fifo", &st) != 0, "FIFO removed after fallback close");
 }
 
 int main(int argc, char **argv) {

@@ -407,6 +407,7 @@ static int gst_spawn(GstAudioImpl *im, char *err_msg, size_t err_cap) {
                 execl(helper_path, "aloud-sink",
                       "--ctrl-fd", cfd_str, "--status-fd", sfd_str, (char *)NULL);
             }
+            fprintf(stderr, "aloud: cannot exec helper %s: %s\n", helper_path, strerror(errno));
         }
 
         close_inherited_fds_except(-1, -1);
@@ -463,12 +464,33 @@ static int gst_spawn(GstAudioImpl *im, char *err_msg, size_t err_cap) {
 
     /* If using the helper, wait briefly (max 400 ms) for its READY/OK banner so we
      * detect missing GStreamer or broken mixersink immediately. */
+    if (!have_helper) {
+        fprintf(stderr, "aloud: audio helper missing in %s; using gst-launch fallback\n",
+                im->helper_dir);
+    }
     if (have_helper && im->status_fd >= 0) {
         struct pollfd pfd = {.fd = im->status_fd, .events = POLLIN};
-        if (poll(&pfd, 1, 400) > 0 && (pfd.revents & POLLIN)) {
-            char banner[128] = {0};
-            ssize_t n = read(im->status_fd, banner, sizeof(banner) - 1);
+        int pr = poll(&pfd, 1, 400);
+        char banner[128] = {0};
+        ssize_t n = -1;
+        if (pr > 0 && (pfd.revents & POLLIN)) {
+            n = read(im->status_fd, banner, sizeof(banner) - 1);
+        }
+        if (pr > 0 && n <= 0) {
+            /* Status pipe closed (HUP or EOF) with no banner: the helper failed to exec and the child
+             * fell through to gst-launch, which has no control channel. Note it so pause
+             * and seek stop that process instead of sending commands nobody reads. */
+            fprintf(stderr, "aloud: audio helper did not start; using gst-launch fallback\n");
+            close(im->ctrl_fd);
+            close(im->status_fd);
+            im->ctrl_fd = -1;
+            im->status_fd = -1;
+        } else if (pr > 0) {
+            if (n > 0 && strncmp(banner, "ERR", 3) != 0 && !im->delay_logged) {
+                fprintf(stderr, "aloud: audio helper started (%s)\n", helper_path);
+            }
             if (n <= 0 || strncmp(banner, "ERR", 3) == 0) {
+                fprintf(stderr, "aloud: audio helper failed: %s\n", n > 0 ? banner : "no banner");
                 if (err_msg && err_cap > 0) {
                     snprintf(err_msg, err_cap, "Connect Bluetooth headphones in Kindle Settings");
                 }
@@ -507,6 +529,19 @@ static int gst_write_s16le(AudioOut *ao, const int16_t *frames, int frame_count)
     return write_pcm(im, frames, frame_count);
 }
 
+/* Make the current pipeline go quiet right now. Caller holds ctrl_mu. */
+static void silence_now_locked(GstAudioImpl *im) {
+    if (im->ctrl_fd >= 0) {
+        char reply[64];
+        (void)send_ctrl_cmd(im, "PAUSE\n", reply, sizeof(reply));
+    } else if (im->pid > 0) {
+        /* gst-launch fallback has no control channel: stopping the process is the
+         * only way to end its mixer stream. The writer starts a new one on resume. */
+        kill(im->pid, SIGKILL);
+        atomic_store(&im->needs_restart, true);
+    }
+}
+
 static int gst_set_paused(AudioOut *ao, bool paused) {
     if (!ao || !ao->impl) return -EINVAL;
     GstAudioImpl *im = (GstAudioImpl *)ao->impl;
@@ -521,8 +556,12 @@ static int gst_set_paused(AudioOut *ao, bool paused) {
     if (paused && im->fifo_path[0]) {
         drain_fifo_nonblocking(im->pcm_fd);
     }
-    char reply[64];
-    (void)send_ctrl_cmd(im, paused ? "PAUSE\n" : "PLAY\n", reply, sizeof(reply));
+    if (paused) {
+        silence_now_locked(im);
+    } else if (im->ctrl_fd >= 0) {
+        char reply[64];
+        (void)send_ctrl_cmd(im, "PLAY\n", reply, sizeof(reply));
+    }
     pthread_mutex_unlock(&im->ctrl_mu);
     return 0;
 }
@@ -533,9 +572,8 @@ static int gst_flush(AudioOut *ao) {
     pthread_mutex_lock(&im->ctrl_mu);
     if (!atomic_load(&im->needs_restart)) {
         /* Silence the old pipeline now; the writer replaces it on the next chunk. */
-        if (!im->paused && im->ctrl_fd >= 0) {
-            char reply[64];
-            (void)send_ctrl_cmd(im, "PAUSE\n", reply, sizeof(reply));
+        if (!im->paused) {
+            silence_now_locked(im);
         }
         if (im->fifo_path[0]) {
             drain_fifo_nonblocking(im->pcm_fd);

@@ -114,11 +114,23 @@ if [ -r "$ALOUD_DIR/state/top_inset_mm.txt" ]; then
   [ -n "$user_inset" ] && TOP_INSET_MM="$user_inset"
 fi
 
-# 7. Run Aloud (loads user's chosen folder from state/library_dir.txt, or prompts on first run).
+# 7. Run the small audio helpers from /var/tmp: /mnt/us is a vfat/fuse mount whose exec
+#    permissions vary by firmware, and a helper that cannot exec silently drops Aloud to
+#    the gst-launch fallback, which cannot pause instantly.
+HELPER_DIR="$ALOUD_DIR/bin"
+TMP_HELPERS=/var/tmp/aloud-helpers
+if mkdir -p "$TMP_HELPERS" 2>/dev/null &&
+   cp -f "$ALOUD_DIR"/bin/aloud-sink-arm* "$TMP_HELPERS"/ 2>/dev/null &&
+   chmod 755 "$TMP_HELPERS"/aloud-sink-arm* 2>/dev/null; then
+  HELPER_DIR="$TMP_HELPERS"
+fi
+echo "aloud: launch $(date) helpers=$HELPER_DIR top_inset_mm=$TOP_INSET_MM" >>"$ALOUD_LOG"
+
+# 8. Run Aloud (loads user's chosen folder from state/library_dir.txt, or prompts on first run).
 "$ALOUD_BIN" \
   --top-inset-mm "$TOP_INSET_MM" \
   --state "$ALOUD_DIR/state" \
   --fonts "$ALOUD_DIR/fonts" \
-  --helpers "$ALOUD_DIR/bin" \
+  --helpers "$HELPER_DIR" \
   "$@" >>"$ALOUD_LOG" 2>&1
 
