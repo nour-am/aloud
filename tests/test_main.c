@@ -12,6 +12,7 @@
 #include "../src/ui.h"
 
 #include <inttypes.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -626,25 +627,32 @@ static void test_gst_backend_with_fake_helper(const char *fixture_dir) {
     for (int i = 0; i < 20; i++) {
         CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write PCM to helper");
     }
+    /* Pause ends the stream at once (the mixer daemon would otherwise play seconds of
+     * buffered audio); resume starts a fresh helper on the next write. */
     CHECK(ao->set_paused(ao, true) == 0, "pause");
-    usleep(150000);
-    CHECK(count_lines_with(logp, "PAUSE") == 1, "pause is sent to the helper");
+    usleep(300000);
+    CHECK(count_lines_with(logp, "STOP") == 1 && count_lines_with(logp, "EXIT") == 1,
+          "pause stops the helper (stops=%d exits=%d)", count_lines_with(logp, "STOP"),
+          count_lines_with(logp, "EXIT"));
     CHECK(ao->set_paused(ao, false) == 0, "resume");
+    CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write after resume");
+    usleep(300000);
+    CHECK(count_lines_with(logp, "START") == 2, "resume started a fresh helper");
 
-    /* Seek: flush silences the old helper; the next write starts a new one. */
+    /* Seek: flush ends the stream; the next write starts a new one. */
     CHECK(ao->flush(ao) == 0, "flush");
     CHECK(ao->set_paused(ao, false) == 0, "resume during pending restart is a no-op");
     CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write after flush");
     usleep(300000);
-    CHECK(count_lines_with(logp, "START") == 2, "flush replaced the helper (starts=%d)",
+    CHECK(count_lines_with(logp, "START") == 3, "flush replaced the helper (starts=%d)",
           count_lines_with(logp, "START"));
-    CHECK(count_lines_with(logp, "STOP") == 1 && count_lines_with(logp, "EXIT") == 1,
-          "old helper was stopped and exited");
+    CHECK(count_lines_with(logp, "STOP") == 2 && count_lines_with(logp, "EXIT") == 2,
+          "old helper was stopped exactly once and exited");
     (void)ao->delay_ms(ao);
 
     audio_out_close(ao);
     usleep(200000);
-    CHECK(count_lines_with(logp, "EXIT") == 2, "close stops the current helper");
+    CHECK(count_lines_with(logp, "EXIT") == 3, "close stops the current helper");
     struct stat st;
     CHECK(stat("/tmp/aloud_audio.fifo", &st) != 0, "FIFO removed on close");
 
@@ -667,6 +675,7 @@ static void test_gst_backend_with_fake_helper(const char *fixture_dir) {
 int main(int argc, char **argv) {
     const char *fixture_dir = (argc > 1) ? argv[1] : "build/test-fixtures";
     const char *font_dir = (argc > 2) ? argv[2] : "third_party/fonts";
+    signal(SIGPIPE, SIG_IGN); /* as src/main.c does: a dead helper must not kill us */
 
     test_natural_sort();
     test_store_persistence_and_recovery(fixture_dir);

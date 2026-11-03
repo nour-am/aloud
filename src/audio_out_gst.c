@@ -53,6 +53,7 @@ typedef struct {
     int64_t measured_delay_ms; /* -1 = unknown */
     int64_t delay_checked_ms;  /* monotonic time of the last POS query */
     bool delay_logged;
+    bool stop_sent;
     bool have_helper;
     char helper_path[1024];
     atomic_bool needs_restart; /* set by flush (UI thread), acted on by the writer */
@@ -304,7 +305,7 @@ static void gst_teardown_child(GstAudioImpl *im) {
         im->pcm_fd = -1;
     }
     if (im->ctrl_fd >= 0) {
-        (void)write(im->ctrl_fd, "STOP\n", 5);
+        if (!im->stop_sent && im->pid > 0) (void)write(im->ctrl_fd, "STOP\n", 5);
         close(im->ctrl_fd);
         im->ctrl_fd = -1;
     }
@@ -461,12 +462,12 @@ static int gst_spawn(GstAudioImpl *im, char *err_msg, size_t err_cap) {
     im->measured_delay_ms = -1;
     im->delay_checked_ms = 0;
     im->delay_logged = false;
+    im->stop_sent = false;
 
     /* If using the helper, wait briefly (max 400 ms) for its READY/OK banner so we
      * detect missing GStreamer or broken mixersink immediately. */
     if (!have_helper) {
-        fprintf(stderr, "aloud: audio helper missing in %s; using gst-launch fallback\n",
-                im->helper_dir);
+        fprintf(stderr, "aloud: using gst-launch (no audio helper in %s)\n", im->helper_dir);
     }
     if (have_helper && im->status_fd >= 0) {
         struct pollfd pfd = {.fd = im->status_fd, .events = POLLIN};
@@ -477,9 +478,39 @@ static int gst_spawn(GstAudioImpl *im, char *err_msg, size_t err_cap) {
             n = read(im->status_fd, banner, sizeof(banner) - 1);
         }
         if (pr > 0 && n <= 0) {
-            /* Status pipe closed (HUP or EOF) with no banner: the helper failed to exec and the child
-             * fell through to gst-launch, which has no control channel. Note it so pause
-             * and seek stop that process instead of sending commands nobody reads. */
+            /* Status pipe closed (HUP or EOF) with no banner. Either the helper could not
+             * exec and the child fell through to gst-launch (still running), or the
+             * helper started and died. A dying process is reaped within moments. */
+            int status = 0;
+            pid_t r = 0;
+            for (int i = 0; i < 10 && r == 0; i++) {
+                r = waitpid(im->pid, &status, WNOHANG);
+                if (r == 0) sleep_ms(10);
+            }
+            if (r == im->pid) {
+                if (WIFSIGNALED(status)) {
+                    fprintf(stderr, "aloud: audio helper %s died (signal %d)\n", helper_path,
+                            WTERMSIG(status));
+                } else {
+                    fprintf(stderr, "aloud: audio helper %s exited (status %d)\n", helper_path,
+                            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+                }
+                im->pid = 0; /* already reaped */
+                gst_teardown_child(im);
+                if (im->have_helper) {
+                    /* Never leave the user without sound: use the firmware gst-launch
+                     * for the rest of this session. */
+                    fprintf(stderr, "aloud: retrying audio with gst-launch\n");
+                    im->have_helper = false;
+                    return gst_spawn(im, err_msg, err_cap);
+                }
+                if (err_msg && err_cap > 0) {
+                    snprintf(err_msg, err_cap, "Connect Bluetooth headphones in Kindle Settings");
+                }
+                return -EIO;
+            }
+            /* Child alive: it is gst-launch, which has no control channel. Pause and
+             * seek stop that process instead of sending commands nobody reads. */
             fprintf(stderr, "aloud: audio helper did not start; using gst-launch fallback\n");
             close(im->ctrl_fd);
             close(im->status_fd);
@@ -529,17 +560,30 @@ static int gst_write_s16le(AudioOut *ao, const int16_t *frames, int frame_count)
     return write_pcm(im, frames, frame_count);
 }
 
-/* Make the current pipeline go quiet right now. Caller holds ctrl_mu. */
-static void silence_now_locked(GstAudioImpl *im) {
-    if (im->ctrl_fd >= 0) {
-        char reply[64];
-        (void)send_ctrl_cmd(im, "PAUSE\n", reply, sizeof(reply));
-    } else if (im->pid > 0) {
-        /* gst-launch fallback has no control channel: stopping the process is the
-         * only way to end its mixer stream. The writer starts a new one on resume. */
-        kill(im->pid, SIGKILL);
-        atomic_store(&im->needs_restart, true);
+/* End the current stream right now; the writer starts a fresh one on its next chunk.
+ * On device, PAUSED alone left ~5 s of audio playing out of the Lab126 mixer daemon,
+ * whereas ending the stream (as seeks do) drops it. Caller holds ctrl_mu.
+ *
+ * Our end of the PCM pipe is atomically replaced by /dev/null (dup2): the helper's
+ * filesrc then sees EOF, so its PAUSED -> NULL teardown cannot block on read(), and
+ * the audio thread can never be caught writing to a closed or reused descriptor. */
+static void end_stream_now_locked(GstAudioImpl *im) {
+    if (im->pcm_fd >= 0) {
+        if (im->fifo_path[0]) drain_fifo_nonblocking(im->pcm_fd);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            (void)dup2(devnull, im->pcm_fd);
+            close(devnull);
+        }
     }
+    if (im->ctrl_fd >= 0) {
+        if (!im->stop_sent) (void)write(im->ctrl_fd, "STOP\n", 5);
+        im->stop_sent = true;
+    } else if (im->pid > 0) {
+        /* gst-launch has no control channel and would play its queue out on EOF. */
+        kill(im->pid, SIGKILL);
+    }
+    atomic_store(&im->needs_restart, true);
 }
 
 static int gst_set_paused(AudioOut *ao, bool paused) {
@@ -552,15 +596,14 @@ static int gst_set_paused(AudioOut *ao, bool paused) {
         pthread_mutex_unlock(&im->ctrl_mu);
         return 0;
     }
-    im->paused = paused;
-    if (paused && im->fifo_path[0]) {
-        drain_fifo_nonblocking(im->pcm_fd);
-    }
     if (paused) {
-        silence_now_locked(im);
-    } else if (im->ctrl_fd >= 0) {
-        char reply[64];
-        (void)send_ctrl_cmd(im, "PLAY\n", reply, sizeof(reply));
+        end_stream_now_locked(im); /* resume restarts it (it rewinds 2 s anyway) */
+    } else {
+        im->paused = false;
+        if (im->ctrl_fd >= 0) {
+            char reply[64];
+            (void)send_ctrl_cmd(im, "PLAY\n", reply, sizeof(reply));
+        }
     }
     pthread_mutex_unlock(&im->ctrl_mu);
     return 0;
@@ -571,14 +614,7 @@ static int gst_flush(AudioOut *ao) {
     GstAudioImpl *im = (GstAudioImpl *)ao->impl;
     pthread_mutex_lock(&im->ctrl_mu);
     if (!atomic_load(&im->needs_restart)) {
-        /* Silence the old pipeline now; the writer replaces it on the next chunk. */
-        if (!im->paused) {
-            silence_now_locked(im);
-        }
-        if (im->fifo_path[0]) {
-            drain_fifo_nonblocking(im->pcm_fd);
-        }
-        atomic_store(&im->needs_restart, true);
+        end_stream_now_locked(im);
     }
     pthread_mutex_unlock(&im->ctrl_mu);
     return 0;

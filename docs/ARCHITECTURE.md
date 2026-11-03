@@ -163,6 +163,14 @@ frontlight on and reportedly swallows short power-button presses. Aloud instead:
   plus our own "screen off" (frontlight to 0 and a static now-playing screen), restored on
   any touch. This is the first thing to test on hardware.
 
+**On-device result (2026-11-03):** `PAUSED` did *not* stop the buffered audio (pause still
+~5 s), so pause now ends the stream like a seek does: our PCM fd is `dup2`'d to
+`/dev/null` (helper gets EOF, can't block in `NULL`), `STOP` is sent, and resume starts a
+fresh helper (it rewinds 2 s anyway). Helpers must run from `/mnt/us`: a `/var/tmp` copy
+died at start-up on the owner's Kindle. If the helper dies at start-up, its exit status is
+logged and Aloud retries with firmware `gst-launch` for the session. (The `New clock:
+GstSystemClock` lines in `aloud.log` come from the firmware GStreamer, not a fallback.)
+
 **Pause, seek and latency (owner feedback, 2026-11-03).** `mixersink` hands PCM to the
 Lab126 mixer daemon, which buffers seconds of audio beyond anything Aloud controls, so
 draining our FIFO alone left a ~5 s pause delay. Pause therefore sets the helper's
