@@ -192,17 +192,19 @@ int main(int argc, char **argv) {
     void *pipeline = NULL;
     void *gerr = NULL;
 
+    const char *q_opts = "queue max-size-buffers=2 max-size-bytes=16384 max-size-time=100000000";
+
     if (fifo_path) {
-        snprintf(desc, sizeof(desc), "filesrc location=\"%s\" ! %s ! queue ! mixersink", fifo_path, caps);
+        snprintf(desc, sizeof(desc), "filesrc location=\"%s\" ! %s ! %s ! mixersink", fifo_path, caps, q_opts);
         pipeline = p_parse(desc, &gerr);
     } else {
         /* Use filesrc location=/dev/stdin first (part of coreelements, present on all
          * Kindle firmwares including stripped FW 5.19.x; RESEARCH.md §6.3). */
-        snprintf(desc, sizeof(desc), "filesrc location=/dev/stdin ! %s ! queue ! mixersink", caps);
+        snprintf(desc, sizeof(desc), "filesrc location=/dev/stdin ! %s ! %s ! mixersink", caps, q_opts);
         pipeline = p_parse(desc, &gerr);
         if (!pipeline || gerr) {
             gerr = NULL;
-            snprintf(desc, sizeof(desc), "fdsrc fd=0 ! %s ! queue ! mixersink", caps);
+            snprintf(desc, sizeof(desc), "fdsrc fd=0 ! %s ! %s ! mixersink", caps, q_opts);
             pipeline = p_parse(desc, &gerr);
         }
     }

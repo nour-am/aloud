@@ -357,7 +357,9 @@ static void *audio_thread_main(void *arg) {
             pthread_cond_wait(&p->cv, &p->mu);
             continue;
         }
-        (void)step_frames_locked(p, PLAYER_CHUNK_FRAMES);
+        /* Step 512 frames (~11.6 ms) per slice so pause/seek commands on the UI
+         * thread take effect almost instantaneously without waiting on a big chunk. */
+        (void)step_frames_locked(p, 512);
     }
     pthread_mutex_unlock(&p->mu);
     return NULL;
@@ -546,6 +548,12 @@ static int seek_book_locked(Player *p, int64_t target_book_ms) {
         update_book_pos_and_chapter_locked(p);
     }
 
+    /* Flush any pre-buffered audio in the sink FIFO immediately so the new seek
+     * position plays right away without waiting for old samples to drain. */
+    if (p->ao && p->ao->flush) {
+        (void)p->ao->flush(p->ao);
+    }
+
     if (target_book_ms < p->book->total_duration_ms) {
         p->finished = false;
     }
@@ -583,6 +591,9 @@ int player_play(Player *p) {
             return rc;
         }
     }
+    if (p->ao && p->ao->set_paused) {
+        (void)p->ao->set_paused(p->ao, false);
+    }
 
     p->playing = true;
     p->paused_idle_ms = 0;
@@ -601,6 +612,9 @@ int player_pause(Player *p) {
     p->playing = false;
     p->paused_once = true;
     p->paused_idle_ms = 0;
+    if (p->ao && p->ao->set_paused) {
+        (void)p->ao->set_paused(p->ao, true);
+    }
     save_position_locked(p);
     pthread_mutex_unlock(&p->mu);
     return 0;

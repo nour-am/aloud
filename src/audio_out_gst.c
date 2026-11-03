@@ -231,11 +231,25 @@ static int send_ctrl_cmd(GstAudioImpl *im, const char *cmd, char *reply, size_t 
     return 0;
 }
 
+static void drain_fifo_nonblocking(int fd) {
+    if (fd < 0) return;
+    uint8_t discard[4096];
+    while (read(fd, discard, sizeof(discard)) > 0) {
+    }
+}
+
 static int gst_set_paused(AudioOut *ao, bool paused) {
     if (!ao || !ao->impl) return -EINVAL;
     GstAudioImpl *im = (GstAudioImpl *)ao->impl;
     if (im->paused == paused) return 0;
     im->paused = paused;
+    if (paused) {
+        /* Drain any unconsumed PCM bytes sitting in the FIFO immediately so
+         * GStreamer cannot keep playing 4-5 seconds of buffered pipe audio. */
+        if (im->fifo_path[0]) {
+            drain_fifo_nonblocking(im->pcm_fd);
+        }
+    }
     char reply[64];
     (void)send_ctrl_cmd(im, paused ? "PAUSE\n" : "PLAY\n", reply, sizeof(reply));
     return 0;
@@ -244,6 +258,9 @@ static int gst_set_paused(AudioOut *ao, bool paused) {
 static int gst_flush(AudioOut *ao) {
     if (!ao || !ao->impl) return -EINVAL;
     GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    if (im->fifo_path[0]) {
+        drain_fifo_nonblocking(im->pcm_fd);
+    }
     char reply[64];
     (void)send_ctrl_cmd(im, "FLUSH\n", reply, sizeof(reply));
     return 0;
@@ -251,15 +268,17 @@ static int gst_flush(AudioOut *ao) {
 
 static int64_t gst_delay_ms(AudioOut *ao) {
     (void)ao;
-    /* Typical pipe + mixersink buffer latency estimate (D6). Avoid synchronous
-     * pipe round-trips here because player_get_snapshot() runs on the UI thread. */
-    return 250;
+    /* With an 8 KB FIFO buffer + 100 ms queue, pipe + mixersink latency is ~150 ms. */
+    return 150;
 }
 
 static void gst_close(AudioOut *ao) {
     if (!ao) return;
     GstAudioImpl *im = (GstAudioImpl *)ao->impl;
     if (im) {
+        if (im->fifo_path[0] && im->pcm_fd >= 0) {
+            drain_fifo_nonblocking(im->pcm_fd);
+        }
         if (im->ctrl_fd >= 0) {
             (void)write(im->ctrl_fd, "STOP\n", 5);
             close(im->ctrl_fd);
@@ -300,7 +319,7 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     /* Create a real named FIFO in /tmp so GStreamer's `filesrc location=...`
      * sees a proper FIFO filesystem node (verified in LARK/KinAmp on Kindle).
      * Opening with O_RDWR | O_NONBLOCK succeeds immediately without waiting
-     * for the child reader. */
+     * for the child reader, and allows draining buffered bytes on pause/seek. */
     const char *fifo_path = "/tmp/aloud_audio.fifo";
     unlink(fifo_path);
     int pcm_fd = -1;
@@ -310,6 +329,9 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
         pcm_fd = open(fifo_path, O_RDWR | O_NONBLOCK);
         if (pcm_fd >= 0) {
             use_fifo = true;
+#ifdef F_SETPIPE_SZ
+            (void)fcntl(pcm_fd, F_SETPIPE_SZ, 8192);
+#endif
         } else {
             unlink(fifo_path);
         }
@@ -319,6 +341,9 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
             return -errno;
         }
         pcm_fd = pcm_pipe[1];
+#ifdef F_SETPIPE_SZ
+        (void)fcntl(pcm_fd, F_SETPIPE_SZ, 8192);
+#endif
     }
 
     int ctrl_pipe[2] = {-1, -1};
