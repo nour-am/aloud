@@ -331,8 +331,14 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     CHECK(rect.h < canvas.height / 2, "play toggle refreshes only partial region (%d px < %d px)",
           rect.h, canvas.height / 2);
 
-    /* Calling ui_on_player_tick when the minute hasn't changed must be a no-op (DESIGN.md). */
-    CHECK(!ui_on_player_tick(&ui, &rect, &wfm), "minute tick skipped when displayed minute unchanged");
+    /* Calling ui_on_player_tick when the displayed second hasn't changed is a no-op;
+     * advancing 1 second triggers a fast DU partial refresh of the progress block. */
+    CHECK(!ui_on_player_tick(&ui, &rect, &wfm), "second tick skipped when displayed second unchanged");
+    for (int i = 0; i < 25; i++) {
+        (void)player_step_frames_sync(player, PLAYER_CHUNK_FRAMES);
+    }
+    CHECK(ui_on_player_tick(&ui, &rect, &wfm) && wfm == ALOUD_WFM_DU,
+          "1-second playback advance refreshes progress block with DU");
 
     /* Tap Speed button -> opens Speed bottom sheet with GL16 partial update. */
     AloudInputEvent tap_speed = {

@@ -49,7 +49,7 @@ struct Player {
 
     int64_t paused_idle_ms;
     int64_t since_last_save_ms;
-    int last_notified_minute;
+    int last_notified_second;
 
     char toast[256];
 
@@ -324,10 +324,10 @@ static int step_frames_locked(Player *p, int max_out_frames) {
         save_position_locked(p);
     }
 
-    /* Notify UI only when the displayed minute changes (DESIGN.md refresh policy). */
-    int cur_min = (int)(p->book_pos_ms / 60000);
-    if (cur_min != p->last_notified_minute) {
-        p->last_notified_minute = cur_min;
+    /* Notify UI every 1 second when the displayed second changes. */
+    int cur_sec = (int)(p->book_pos_ms / 1000);
+    if (cur_sec != p->last_notified_second) {
+        p->last_notified_second = cur_sec;
         notify_main_locked(p);
     }
 
@@ -387,7 +387,7 @@ int player_create(Player **out, Store *store, const char *state_dir, const char 
     p->speed_x100 = 100;
     p->volume_pct = 100;
     p->last_chapter_index = -1;
-    p->last_notified_minute = -1;
+    p->last_notified_second = -1;
 
     p->sonic = sonicCreateStream(DECODER_OUT_RATE, DECODER_OUT_CHANNELS);
     if (!p->sonic) {

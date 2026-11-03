@@ -91,7 +91,7 @@ int ui_init(Ui *ui, Canvas *canvas, TextSystem *text, Library *library,
     ui->has_volume_control = has_volume_control;
     ui->screen = UI_SCREEN_LIBRARY;
     ui->sheet = UI_SHEET_NONE;
-    ui->last_drawn_minute = -1;
+    ui->last_drawn_second = -1;
     ui->last_drawn_sleep_min = -1;
     snprintf(ui->library_dir, sizeof(ui->library_dir), "/mnt/us/audiobooks");
     snprintf(ui->browse_dir, sizeof(ui->browse_dir), "/mnt/us");
@@ -1107,7 +1107,7 @@ static void render_player_screen(Ui *ui) {
 
     render_active_sheet(ui, &snap);
 
-    ui->last_drawn_minute = (int)(snap.book_pos_ms / 60000);
+    ui->last_drawn_second = (int)(snap.book_pos_ms / 1000);
     ui->last_drawn_sleep_min = (snap.sleep_rem_ms > 0) ? (int)((snap.sleep_rem_ms + 59999) / 60000) : 0;
     ui->last_drawn_playing = snap.playing;
 }
@@ -1798,16 +1798,16 @@ bool ui_on_player_tick(Ui *ui, AloudRect *out_rect, AloudWaveform *out_wfm) {
         return true;
     }
 
-    int cur_min = (int)(snap.book_pos_ms / 60000);
+    int cur_sec = (int)(snap.book_pos_ms / 1000);
     int cur_sleep_min = (snap.sleep_rem_ms > 0) ? (int)((snap.sleep_rem_ms + 59999) / 60000) : 0;
 
-    /* Skip refresh completely when nothing visible changed (DESIGN.md). */
-    if (cur_min == ui->last_drawn_minute &&
+    /* Skip refresh completely when the displayed second and sleep timer minute are unchanged. */
+    if (cur_sec == ui->last_drawn_second &&
         cur_sleep_min == ui->last_drawn_sleep_min) {
         return false;
     }
 
-    ui->last_drawn_minute = cur_min;
+    ui->last_drawn_second = cur_sec;
     render_player_progress_block(ui, &snap,
                                  ui->region_progress.x, ui->region_progress.y,
                                  ui->region_progress.w);

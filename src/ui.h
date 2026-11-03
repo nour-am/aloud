@@ -105,7 +105,7 @@ typedef struct {
 
     /* Refresh policy state. */
     int full_repaint_counter;
-    int last_drawn_minute;
+    int last_drawn_second;
     int last_drawn_sleep_min;
     bool last_drawn_playing;
     bool quit_requested;

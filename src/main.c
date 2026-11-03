@@ -638,12 +638,12 @@ int main(int argc, char **argv) {
         }
 
         /* Compute poll timeout:
-         * - While playing: wake once per minute (60,000 ms).
+         * - While playing: wake every 1 second (1,000 ms) so progress indicator stays synced.
          * - Just paused while audio helper may still be open: wake once after 2 min to close it.
          * - Otherwise paused & idle: timeout = -1 (infinite, zero CPU wakeups per D7). */
         int timeout_ms = -1;
         if (snap.playing) {
-            timeout_ms = 60000;
+            timeout_ms = 1000;
         } else if (has_been_playing) {
             timeout_ms = PLAYER_IDLE_SINK_CLOSE_MS;
         }
@@ -682,14 +682,15 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (notify_slot >= 0 && (pfds[notify_slot].revents & POLLIN)) {
+        bool notify_fired = (notify_slot >= 0 && (pfds[notify_slot].revents & POLLIN));
+        if (notify_fired) {
             player_clear_notify(player);
-            if (!power.in_screensaver) {
-                AloudRect r;
-                AloudWaveform w;
-                if (ui_on_player_tick(&ui, &r, &w)) {
-                    platform_refresh(plat, &canvas, r, w);
-                }
+        }
+        if ((notify_fired || (pr == 0 && snap.playing)) && !power.in_screensaver) {
+            AloudRect r;
+            AloudWaveform w;
+            if (ui_on_player_tick(&ui, &r, &w)) {
+                platform_refresh(plat, &canvas, r, w);
             }
         }
 
