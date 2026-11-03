@@ -138,6 +138,24 @@ static int parse_file(const char *path, Store *out) {
     return 0;
 }
 
+static void load_library_dir_file(Store *s, const char *state_dir) {
+    char lpath[1024];
+    snprintf(lpath, sizeof(lpath), "%s/library_dir.txt", state_dir);
+    FILE *fp = fopen(lpath, "r");
+    if (!fp) return;
+    char line[1024];
+    if (fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) {
+            line[--len] = '\0';
+        }
+        if (line[0] != '\0') {
+            snprintf(s->library_dir, sizeof(s->library_dir), "%s", line);
+        }
+    }
+    fclose(fp);
+}
+
 int store_load(Store *s, const char *state_dir) {
     if (!s || !state_dir) {
         return -EINVAL;
@@ -151,20 +169,24 @@ int store_load(Store *s, const char *state_dir) {
 
     int rc = parse_file(primary, s);
     if (rc == 0) {
+        load_library_dir_file(s, state_dir);
         return 0;
     }
 
     int brc = parse_file(backup, s);
     if (brc == 0) {
         s->recovered_from_bak = true;
+        load_library_dir_file(s, state_dir);
         return 0;
     }
 
     if (rc == -ENOENT && brc == -ENOENT) {
+        load_library_dir_file(s, state_dir);
         return 0;
     }
     /* Both files were corrupt; start clean rather than crashing (Conventions). */
     store_init(s);
+    load_library_dir_file(s, state_dir);
     return -EIO;
 }
 
@@ -351,3 +373,59 @@ int store_set(Store *s, const char *key, int file_index, int64_t position_ms,
     e->finished = finished;
     return 0;
 }
+
+const char *store_get_library_dir(const Store *s) {
+    if (!s || s->library_dir[0] == '\0') {
+        return NULL;
+    }
+    return s->library_dir;
+}
+
+int store_set_library_dir(Store *s, const char *state_dir, const char *library_dir) {
+    if (!s || !library_dir || library_dir[0] == '\0') {
+        return -EINVAL;
+    }
+    snprintf(s->library_dir, sizeof(s->library_dir), "%s", library_dir);
+    /* Trim trailing slash unless root "/" */
+    size_t len = strlen(s->library_dir);
+    while (len > 1 && s->library_dir[len - 1] == '/') {
+        s->library_dir[--len] = '\0';
+    }
+
+    if (!state_dir || state_dir[0] == '\0') {
+        return 0;
+    }
+    if (mkdir_p(state_dir) != 0) {
+        return -errno;
+    }
+
+    char primary[1024];
+    char tmp_path[1024];
+    snprintf(primary, sizeof(primary), "%s/library_dir.txt", state_dir);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/library_dir.txt.tmp", state_dir);
+
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        return -errno;
+    }
+    char line[1040];
+    int n = snprintf(line, sizeof(line), "%s\n", s->library_dir);
+    if (n <= 0 || write(fd, line, (size_t)n) != (ssize_t)n || fsync(fd) != 0) {
+        close(fd);
+        unlink(tmp_path);
+        return -EIO;
+    }
+    close(fd);
+    if (rename(tmp_path, primary) != 0) {
+        int err = errno;
+        unlink(tmp_path);
+        return -err;
+    }
+    int dir_fd = open(state_dir, O_RDONLY);
+    if (dir_fd >= 0) {
+        (void)fsync(dir_fd);
+        close(dir_fd);
+    }
+    return 0;
+}
+

@@ -200,6 +200,258 @@ static int export_profile_screens(const char *prefix, int w, int h, int dpi,
     snprintf(path, sizeof(path), "%s/%s_empty.png", out_dir, prefix);
     platform_write_png(&canvas, path);
 
+    /* 7. Audiobook folder picker screen. */
+    ui.library = &lib;
+    ui_set_storage(&ui, &store, state_dir, lib_dir);
+    ui_open_folder_picker(&ui, NULL);
+    ui_render_full(&ui, false, &rect, &wfm);
+    snprintf(path, sizeof(path), "%s/%s_folders.png", out_dir, prefix);
+    platform_write_png(&canvas, path);
+
+    ui_free(&ui);
+    player_destroy(player);
+    canvas_free(&canvas);
+    text_free(ts);
+    lib_free(&lib);
+    return 0;
+}
+
+static const char *wfm_name(AloudWaveform w) {
+    switch (w) {
+        case ALOUD_WFM_NONE: return "NONE";
+        case ALOUD_WFM_DU: return "DU (fast monochrome, non-flashing)";
+        case ALOUD_WFM_GL16: return "GL16 (16-gray, non-flashing)";
+        case ALOUD_WFM_GC16_FLASH: return "GC16 (full flashing clear)";
+    }
+    return "GL16";
+}
+
+/* Execute a multi-step interactive user session on the host simulator,
+ * logging every tap, dirty rectangle, e-ink waveform, audio output, and
+ * persisted position, and exporting step-by-step PNGs + hit-box JSON. */
+static int run_interactive_walkthrough(const char *lib_dir, const char *state_dir,
+                                       const char *font_dir, const char *out_dir) {
+    mkdir(out_dir, 0755);
+
+    Store store;
+    store_init(&store);
+    (void)store_load(&store, state_dir);
+
+    Library lib;
+    lib_init(&lib);
+    (void)lib_scan(&lib, lib_dir, state_dir, &store);
+
+    TextSystem *ts = NULL;
+    if (text_init(&ts, font_dir) < 0) {
+        lib_free(&lib);
+        return 1;
+    }
+
+    Canvas canvas;
+    if (canvas_init(&canvas, 1236, 1648, 300) < 0) {
+        text_free(ts);
+        lib_free(&lib);
+        return 1;
+    }
+
+    Player *player = NULL;
+    if (player_create(&player, &store, state_dir, NULL) < 0) {
+        canvas_free(&canvas);
+        text_free(ts);
+        lib_free(&lib);
+        return 1;
+    }
+
+    char wav_path[1024];
+    snprintf(wav_path, sizeof(wav_path), "%s/sim_output.wav", out_dir);
+    AudioOut *sim_ao = NULL;
+    if (audio_out_open_sim(&sim_ao, wav_path) == 0) {
+        player_set_sim_audio(player, sim_ao);
+    }
+
+    Ui ui;
+    ui_init(&ui, &canvas, ts, &lib, player, true);
+
+    char png_path[1024];
+    AloudRect r;
+    AloudWaveform wfm;
+
+    printf("=== Aloud Interactive Simulator Walkthrough (1236x1648 @ 300 DPI) ===\n");
+    printf("Discovered %zu audiobooks in %s:\n", lib.count, lib_dir);
+    for (size_t i = 0; i < lib.count; i++) {
+        printf("  [%zu] \"%s\" by %s (%zu chapters, %lld ms)\n",
+               i + 1, lib.books[i].title, lib.books[i].author,
+               lib.books[i].chapter_count, (long long)lib.books[i].total_duration_ms);
+    }
+
+    /* Step 1: Initial Library screen render. */
+    ui_render_full(&ui, true, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step1_library.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 1] Render Library Screen -> %s\n", png_path);
+    printf("         Refresh region: (%d, %d, %d x %d) | Waveform: %s\n",
+           r.x, r.y, r.w, r.h, wfm_name(wfm));
+    AloudRect lib_row0 = ui.hit_list_rows[0];
+    AloudRect lib_row1 = ui.hit_list_rows[1];
+    AloudRect lib_exit = ui.hit_header_right;
+
+    /* Step 2: Tap Book #1 ("Moby-Dick") in Library. */
+    AloudInputEvent ev = {
+        .type = ALOUD_EV_TAP,
+        .x = lib_row0.x + lib_row0.w / 2,
+        .y = lib_row0.y + lib_row0.h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step2_player_paused.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 2] Tap Book 1 at (%d, %d) -> Opens Player Screen -> %s\n", ev.x, ev.y, png_path);
+    printf("         Refresh region: (%d, %d, %d x %d) | Waveform: %s\n",
+           r.x, r.y, r.w, r.h, wfm_name(wfm));
+
+    AloudRect hit_lib_back = ui.hit_header_left;
+    AloudRect hit_chaps = ui.hit_header_right;
+    AloudRect hit_scrub = ui.hit_scrubber;
+    AloudRect hit_prev_ch = ui.hit_prev_chap;
+    AloudRect hit_back30 = ui.hit_skip_back;
+    AloudRect hit_play = ui.hit_play_pause;
+    AloudRect hit_fwd30 = ui.hit_skip_fwd;
+    AloudRect hit_next_ch = ui.hit_next_chap;
+    AloudRect hit_speed = ui.hit_speed_btn;
+    AloudRect hit_sleep = ui.hit_sleep_btn;
+    AloudRect hit_vol_dn = ui.hit_vol_down;
+    AloudRect hit_vol_up = ui.hit_vol_up;
+
+    /* Step 3: Tap Play button -> starts playback and surgical DU refresh. */
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = hit_play.x + hit_play.w / 2,
+        .y = hit_play.y + hit_play.h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step3_player_playing.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 3] Tap Play Disc at (%d, %d) -> Playback started -> %s\n", ev.x, ev.y, png_path);
+    printf("         Surgical Refresh: (%d, %d, %d x %d) | Waveform: %s\n",
+           r.x, r.y, r.w, r.h, wfm_name(wfm));
+
+    /* Decode 1.5 seconds of audio into sim_output.wav. */
+    int64_t frames = player_step_frames_sync(player, 44100 + 22050);
+    printf("         Audio Engine: decoded & resampled %lld stereo frames to %s\n",
+           (long long)frames, wav_path);
+
+    /* Step 4: Tap Speed button -> opens Speed bottom sheet. */
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = hit_speed.x + hit_speed.w / 2,
+        .y = hit_speed.y + hit_speed.h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step4_speed_sheet.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 4] Tap Speed Button at (%d, %d) -> Opens Speed Sheet -> %s\n", ev.x, ev.y, png_path);
+    printf("         Partial Sheet Refresh: (%d, %d, %d x %d) | Waveform: %s\n",
+           r.x, r.y, r.w, r.h, wfm_name(wfm));
+    AloudRect speed_opts[UI_SPEED_OPTION_COUNT];
+    memcpy(speed_opts, ui.hit_sheet_opts, sizeof(speed_opts));
+    AloudRect sheet_close = ui.hit_sheet_close;
+
+    /* Step 5: Tap 1.5x speed option (index 4). */
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = speed_opts[4].x + speed_opts[4].w / 2,
+        .y = speed_opts[4].y + speed_opts[4].h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    frames += player_step_frames_sync(player, 44100);
+    snprintf(png_path, sizeof(png_path), "%s/step5_speed_15x.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 5] Tap 1.5x Speed Option at (%d, %d) -> Speed set to 1.5x (sonic pitch-preserved) -> %s\n",
+           ev.x, ev.y, png_path);
+    printf("         Refresh region: (%d, %d, %d x %d) | Waveform: %s\n",
+           r.x, r.y, r.w, r.h, wfm_name(wfm));
+
+    /* Step 6: Tap Sleep Timer button -> opens Sleep sheet, then select 30 min (index 2). */
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = hit_sleep.x + hit_sleep.w / 2,
+        .y = hit_sleep.y + hit_sleep.h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step6_sleep_sheet.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 6] Tap Sleep Button at (%d, %d) -> Opens Sleep Timer Sheet -> %s\n",
+           ev.x, ev.y, png_path);
+    AloudRect sleep_opts[UI_SLEEP_OPTION_COUNT];
+    memcpy(sleep_opts, ui.hit_sheet_opts, sizeof(sleep_opts));
+
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = sleep_opts[2].x + sleep_opts[2].w / 2,
+        .y = sleep_opts[2].y + sleep_opts[2].h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step7_sleep_active.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 7] Tap '30 min' Sleep Option at (%d, %d) -> Sleep pill inverted (active) -> %s\n",
+           ev.x, ev.y, png_path);
+
+    /* Step 8: Tap Chapters button -> opens Chapters list, then jump to Chapter 3. */
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = hit_chaps.x + hit_chaps.w / 2,
+        .y = hit_chaps.y + hit_chaps.h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    snprintf(png_path, sizeof(png_path), "%s/step8_chapters.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 8] Tap 'Chapters' at (%d, %d) -> Opens Chapters Screen -> %s\n",
+           ev.x, ev.y, png_path);
+    AloudRect chap_row2 = ui.hit_list_rows[2];
+
+    ev = (AloudInputEvent){
+        .type = ALOUD_EV_TAP,
+        .x = chap_row2.x + chap_row2.w / 2,
+        .y = chap_row2.y + chap_row2.h / 2
+    };
+    (void)ui_handle_event(&ui, ev, &r, &wfm);
+    frames += player_step_frames_sync(player, 44100);
+    snprintf(png_path, sizeof(png_path), "%s/step9_chapter3_playing.png", out_dir);
+    platform_write_png(&canvas, png_path);
+    printf("\n[Step 9] Tap Chapter 3 at (%d, %d) -> Seeks to Chapter 3 & returns to Player -> %s\n",
+           ev.x, ev.y, png_path);
+
+    /* Write hit-box layout JSON for interactive simulator inspection. */
+    char json_path[1024];
+    snprintf(json_path, sizeof(json_path), "%s/hitboxes.json", out_dir);
+    FILE *jf = fopen(json_path, "w");
+    if (jf) {
+        fprintf(jf, "{\n");
+        fprintf(jf, "  \"screen\": {\"w\": 1236, \"h\": 1648, \"dpi\": 300},\n");
+        fprintf(jf, "  \"lib_row0\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", lib_row0.x, lib_row0.y, lib_row0.w, lib_row0.h);
+        fprintf(jf, "  \"lib_row1\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", lib_row1.x, lib_row1.y, lib_row1.w, lib_row1.h);
+        fprintf(jf, "  \"lib_exit\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", lib_exit.x, lib_exit.y, lib_exit.w, lib_exit.h);
+        fprintf(jf, "  \"hit_lib_back\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_lib_back.x, hit_lib_back.y, hit_lib_back.w, hit_lib_back.h);
+        fprintf(jf, "  \"hit_chaps\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_chaps.x, hit_chaps.y, hit_chaps.w, hit_chaps.h);
+        fprintf(jf, "  \"hit_scrub\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_scrub.x, hit_scrub.y, hit_scrub.w, hit_scrub.h);
+        fprintf(jf, "  \"hit_prev_ch\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_prev_ch.x, hit_prev_ch.y, hit_prev_ch.w, hit_prev_ch.h);
+        fprintf(jf, "  \"hit_back30\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_back30.x, hit_back30.y, hit_back30.w, hit_back30.h);
+        fprintf(jf, "  \"hit_play\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_play.x, hit_play.y, hit_play.w, hit_play.h);
+        fprintf(jf, "  \"hit_fwd30\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_fwd30.x, hit_fwd30.y, hit_fwd30.w, hit_fwd30.h);
+        fprintf(jf, "  \"hit_next_ch\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_next_ch.x, hit_next_ch.y, hit_next_ch.w, hit_next_ch.h);
+        fprintf(jf, "  \"hit_speed\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_speed.x, hit_speed.y, hit_speed.w, hit_speed.h);
+        fprintf(jf, "  \"hit_sleep\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_sleep.x, hit_sleep.y, hit_sleep.w, hit_sleep.h);
+        fprintf(jf, "  \"hit_vol_dn\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_vol_dn.x, hit_vol_dn.y, hit_vol_dn.w, hit_vol_dn.h);
+        fprintf(jf, "  \"hit_vol_up\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", hit_vol_up.x, hit_vol_up.y, hit_vol_up.w, hit_vol_up.h);
+        fprintf(jf, "  \"sheet_close\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d},\n", sheet_close.x, sheet_close.y, sheet_close.w, sheet_close.h);
+        fprintf(jf, "  \"chap_row2\": {\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d}\n", chap_row2.x, chap_row2.y, chap_row2.w, chap_row2.h);
+        fprintf(jf, "}\n");
+        fclose(jf);
+    }
+
+    (void)player_save_position_now(player);
+    printf("\n[Done] Total stereo frames rendered to WAV: %lld (%s)\n", (long long)frames, wav_path);
+    printf("       Atomic position saved to %s/positions.tsv\n", state_dir);
+
     ui_free(&ui);
     player_destroy(player);
     canvas_free(&canvas);
@@ -210,16 +462,22 @@ static int export_profile_screens(const char *prefix, int w, int h, int dpi,
 
 int main(int argc, char **argv) {
     const char *library_dir = "/mnt/us/audiobooks";
+    bool explicit_lib = false;
+    bool choose_folder = false;
     const char *state_dir = "/mnt/us/extensions/aloud/state";
     const char *font_dir = "/mnt/us/extensions/aloud/fonts";
     const char *helper_dir = "/mnt/us/extensions/aloud/bin";
     const char *export_screens_dir = NULL;
+    const char *walkthrough_dir = NULL;
     bool tone_test = false;
     int tone_seconds = 10;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--library") == 0 && i + 1 < argc) {
             library_dir = argv[++i];
+            explicit_lib = true;
+        } else if (strcmp(argv[i], "--choose-folder") == 0) {
+            choose_folder = true;
         } else if (strcmp(argv[i], "--state") == 0 && i + 1 < argc) {
             state_dir = argv[++i];
         } else if (strcmp(argv[i], "--fonts") == 0 && i + 1 < argc) {
@@ -228,6 +486,8 @@ int main(int argc, char **argv) {
             helper_dir = argv[++i];
         } else if (strcmp(argv[i], "--export-screens") == 0 && i + 1 < argc) {
             export_screens_dir = argv[++i];
+        } else if (strcmp(argv[i], "--walkthrough") == 0 && i + 1 < argc) {
+            walkthrough_dir = argv[++i];
         } else if (strcmp(argv[i], "--tone-test") == 0) {
             tone_test = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -253,6 +513,10 @@ int main(int argc, char **argv) {
 
     if (tone_test) {
         return run_tone_test(helper_dir, tone_seconds);
+    }
+
+    if (walkthrough_dir) {
+        return run_interactive_walkthrough(library_dir, state_dir, font_dir, walkthrough_dir);
     }
 
     if (export_screens_dir) {
@@ -295,6 +559,11 @@ int main(int argc, char **argv) {
     store_init(&store);
     (void)store_load(&store, state_dir);
 
+    const char *saved_dir = store_get_library_dir(&store);
+    if (!explicit_lib && saved_dir && saved_dir[0]) {
+        library_dir = saved_dir;
+    }
+
     Library lib;
     lib_init(&lib);
     (void)lib_scan(&lib, library_dir, state_dir, &store);
@@ -315,6 +584,13 @@ int main(int argc, char **argv) {
 
     Ui ui;
     ui_init(&ui, &canvas, ts, &lib, player, platform_has_volume_control(plat));
+    ui_set_storage(&ui, &store, state_dir, library_dir);
+
+    /* Prompt the user to choose their audiobook folder on first launch (when no
+     * folder has been saved yet) or when explicitly requested via --choose-folder. */
+    if (choose_folder || (!explicit_lib && !saved_dir)) {
+        ui_open_folder_picker(&ui, "/mnt/us");
+    }
 
     AloudRect init_rect;
     AloudWaveform init_wfm;

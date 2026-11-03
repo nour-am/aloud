@@ -12,8 +12,16 @@
                     "internal": "status Launching Aloud..."
                 },
                 {
-                    "name": "Test Audio & Sleep (10s 440Hz tone)",
+                    "name": "Choose Audiobook Folder...",
                     "priority": 2,
+                    "action": "/mnt/us/extensions/aloud/aloud.sh",
+                    "params": "--choose-folder",
+                    "exitmenu": true,
+                    "internal": "status Opening folder picker..."
+                },
+                {
+                    "name": "Test Audio & Sleep (10s 440Hz tone)",
+                    "priority": 3,
                     "action": "/mnt/us/extensions/aloud/bin/aloud",
                     "params": "--tone-test 10 --helpers /mnt/us/extensions/aloud/bin",
                     "exitmenu": false,
@@ -21,7 +29,7 @@
                 },
                 {
                     "name": "Save Device Diagnostics (aloud-diagnose.txt)",
-                    "priority": 3,
+                    "priority": 4,
                     "action": "/mnt/us/extensions/aloud/bin/kindle-diagnose.sh",
                     "exitmenu": false,
                     "internal": "status Writing aloud-diagnose.txt to USB root..."

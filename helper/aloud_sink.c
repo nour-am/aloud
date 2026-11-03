@@ -196,13 +196,13 @@ int main(int argc, char **argv) {
         snprintf(desc, sizeof(desc), "filesrc location=\"%s\" ! %s ! queue ! mixersink", fifo_path, caps);
         pipeline = p_parse(desc, &gerr);
     } else {
-        /* Try fdsrc fd=0 first; if stripped firmware GStreamer lacks fdsrc,
-         * fall back to filesrc location=/dev/stdin (proven on PW4, RESEARCH.md §6.3). */
-        snprintf(desc, sizeof(desc), "fdsrc fd=0 ! %s ! queue ! mixersink", caps);
+        /* Use filesrc location=/dev/stdin first (part of coreelements, present on all
+         * Kindle firmwares including stripped FW 5.19.x; RESEARCH.md §6.3). */
+        snprintf(desc, sizeof(desc), "filesrc location=/dev/stdin ! %s ! queue ! mixersink", caps);
         pipeline = p_parse(desc, &gerr);
         if (!pipeline || gerr) {
             gerr = NULL;
-            snprintf(desc, sizeof(desc), "filesrc location=/dev/stdin ! %s ! queue ! mixersink", caps);
+            snprintf(desc, sizeof(desc), "fdsrc fd=0 ! %s ! queue ! mixersink", caps);
             pipeline = p_parse(desc, &gerr);
         }
     }
@@ -210,13 +210,12 @@ int main(int argc, char **argv) {
     if (!pipeline) {
         write_status(status_fd, "ERR parse-pipeline-failed\n");
         fprintf(stderr, "aloud-sink: failed to create pipeline: %s\n", desc);
-        return 4;
+        _exit(4);
     }
 
-    if (p_set_state(pipeline, GST_STATE_PLAYING) == 0) {
+    if (p_set_state(pipeline, GST_STATE_PLAYING) <= 0) {
         write_status(status_fd, "ERR set-playing-failed\n");
-        p_unref(pipeline);
-        return 5;
+        _exit(5);
     }
 
     write_status(status_fd, "OK\n");
@@ -227,9 +226,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < wait_s * 10; i++) {
             usleep(100000);
         }
-        p_set_state(pipeline, GST_STATE_NULL);
-        p_unref(pipeline);
-        return 0;
+        _exit(0);
     }
 
     char cmd_buf[128];
@@ -255,15 +252,14 @@ int main(int argc, char **argv) {
             char *nl;
             while ((nl = strchr(cmd_buf, '\n')) != NULL) {
                 *nl = '\0';
-                if (strcmp(cmd_buf, "PAUSE") == 0) {
-                    p_set_state(pipeline, GST_STATE_PAUSED);
-                    write_status(status_fd, "OK\n");
-                } else if (strcmp(cmd_buf, "PLAY") == 0) {
-                    p_set_state(pipeline, GST_STATE_PLAYING);
-                    write_status(status_fd, "OK\n");
-                } else if (strcmp(cmd_buf, "FLUSH") == 0) {
-                    p_set_state(pipeline, GST_STATE_READY);
-                    p_set_state(pipeline, GST_STATE_PLAYING);
+                if (strcmp(cmd_buf, "PAUSE") == 0 ||
+                    strcmp(cmd_buf, "PLAY") == 0 ||
+                    strcmp(cmd_buf, "FLUSH") == 0) {
+                    /* Note: Do NOT call gst_element_set_state(PAUSED/READY) on a pipeline
+                     * fed by blocking filesrc location=/dev/stdin, because filesrc holds
+                     * the GStreamer pad stream lock while blocked in read(0) and state
+                     * transitions deadlock waiting for that lock. Stopping PCM writes on
+                     * the parent side naturally idles mixersink. */
                     write_status(status_fd, "OK\n");
                 } else if (strcmp(cmd_buf, "POS") == 0) {
                     int64_t pos_ns = 0;
@@ -294,7 +290,8 @@ int main(int argc, char **argv) {
     }
 
     (void)p_get_state;
-    p_set_state(pipeline, GST_STATE_NULL);
-    p_unref(pipeline);
-    return 0;
+    (void)p_unref;
+    /* Exit immediately so gst_element_set_state(NULL) cannot hang waiting on
+     * filesrc read(0) or mixersink IPC teardown. */
+    _exit(0);
 }

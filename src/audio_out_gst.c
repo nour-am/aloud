@@ -34,11 +34,37 @@ typedef struct {
     int pcm_fd;
     int ctrl_fd;
     int status_fd;
+    char fifo_path[64];
     int64_t frames_written;
     bool paused;
 } GstAudioImpl;
 
-static int run_cmd_capture(char *const argv[], char *out, size_t out_cap) {
+static void close_inherited_fds_except(int keep1, int keep2) {
+    for (int fd = 3; fd < 64; fd++) {
+        if (fd != keep1 && fd != keep2) {
+            close(fd);
+        }
+    }
+}
+
+static void reap_child_bounded(pid_t pid, int wait_ms_total) {
+    if (pid <= 0) return;
+    int status = 0;
+    int elapsed = 0;
+    while (elapsed < wait_ms_total) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r != 0) return;
+        sleep_ms(10);
+        elapsed += 10;
+    }
+    kill(pid, SIGKILL);
+    for (int i = 0; i < 5; i++) {
+        if (waitpid(pid, &status, WNOHANG) != 0) return;
+        sleep_ms(5);
+    }
+}
+
+static int run_cmd_capture_timeout(char *const argv[], char *out, size_t out_cap, int timeout_ms) {
     if (out && out_cap > 0) out[0] = '\0';
     int pfd[2];
     if (pipe(pfd) != 0) return -1;
@@ -58,57 +84,79 @@ static int run_cmd_capture(char *const argv[], char *out, size_t out_cap) {
             close(devnull);
         }
         close(pfd[1]);
+        close_inherited_fds_except(-1, -1);
         execvp(argv[0], argv);
         _exit(127);
     }
     close(pfd[1]);
+    int fl = fcntl(pfd[0], F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(pfd[0], F_SETFL, fl | O_NONBLOCK);
+
     size_t total = 0;
-    if (out && out_cap > 1) {
-        ssize_t n;
-        while (total + 1 < out_cap &&
-               (n = read(pfd[0], out + total, out_cap - 1 - total)) > 0) {
-            total += (size_t)n;
+    int elapsed = 0;
+    while (elapsed < timeout_ms) {
+        struct pollfd pf = {.fd = pfd[0], .events = POLLIN};
+        int pr = poll(&pf, 1, 25);
+        elapsed += 25;
+        if (pr > 0) {
+            if (pf.revents & POLLIN) {
+                char discard[128];
+                char *dst = (out && total + 1 < out_cap) ? (out + total) : discard;
+                size_t cap = (out && total + 1 < out_cap) ? (out_cap - 1 - total) : sizeof(discard);
+                ssize_t n = read(pfd[0], dst, cap);
+                if (n > 0) {
+                    if (dst != discard) total += (size_t)n;
+                    continue;
+                }
+            }
+            if (pf.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                break;
+            }
         }
-        out[total] = '\0';
+        int status = 0;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            close(pfd[0]);
+            if (out && out_cap > 0) out[total] = '\0';
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        }
     }
     close(pfd[0]);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (out && out_cap > 0) out[total] = '\0';
+    reap_child_bounded(pid, 30);
+    return -1;
 }
 
-/* Check Bluetooth output state via lipc (RESEARCH.md §6.4, ARCHITECTURE.md D6).
- * Returns true if connected (or if lipc is absent on non-BT devices). */
-static bool check_or_reconnect_bt(char *err_msg, size_t err_cap) {
-    if (access("/usr/bin/lipc-get-prop", X_OK) != 0) {
-        return true;
+/* Best-effort Bluetooth wake/reconnect check via lipc (strictly timeout-bounded
+ * so it can never block the audio thread if btfd is slow). */
+static void try_wake_bt_nonblocking(void) {
+    if (access("/usr/bin/lipc-set-prop", X_OK) == 0) {
+        char *ensure_cmd[] = {"/usr/bin/lipc-set-prop", "-i", "com.lab126.btfd", "ensureBTconnection", "1", NULL};
+        (void)run_cmd_capture_timeout(ensure_cmd, NULL, 0, 150);
     }
 
-    char out[512];
+    if (access("/usr/bin/lipc-get-prop", X_OK) != 0) {
+        return;
+    }
+
+    char out[256];
     char *bt_cmd[] = {"/usr/bin/lipc-get-prop", "com.lab126.btfd", "BTconnectedDevName", NULL};
-    if (run_cmd_capture(bt_cmd, out, sizeof(out)) == 0) {
-        /* Trim whitespace */
+    if (run_cmd_capture_timeout(bt_cmd, out, sizeof(out), 150) == 0) {
         for (size_t i = strlen(out); i > 0 && (out[i - 1] == '\n' || out[i - 1] == '\r' || out[i - 1] == ' '); i--) {
             out[i - 1] = '\0';
         }
         if (out[0] != '\0' && strcmp(out, "none") != 0 && strcmp(out, "NULL") != 0) {
-            return true;
+            return;
         }
     }
 
-    char *am_cmd[] = {"/usr/bin/lipc-get-prop", "com.lab126.audiomgrd", "audioOutputConnected", NULL};
-    if (run_cmd_capture(am_cmd, out, sizeof(out)) == 0 && atoi(out) > 0) {
-        return true;
-    }
-
     /* Check if a paired MAC is known in /var/local/zbluetooth/bt_config.conf and
-     * attempt a single non-destructive `Connect <MAC>` (D6). */
+     * attempt a fast non-blocking `Connect <MAC>` (D6). */
     FILE *fp = fopen("/var/local/zbluetooth/bt_config.conf", "r");
     if (fp) {
         char line[256];
         char mac[32] = {0};
         while (fgets(line, sizeof(line), fp)) {
-            /* Look for XX:XX:XX:XX:XX:XX pattern */
             for (size_t i = 0; line[i] && i + 17 <= strlen(line); i++) {
                 if (line[i + 2] == ':' && line[i + 5] == ':' &&
                     line[i + 8] == ':' && line[i + 11] == ':' && line[i + 14] == ':') {
@@ -122,24 +170,9 @@ static bool check_or_reconnect_bt(char *err_msg, size_t err_cap) {
         fclose(fp);
         if (mac[0] && access("/usr/bin/lipc-set-prop", X_OK) == 0) {
             char *conn_cmd[] = {"/usr/bin/lipc-set-prop", "com.lab126.btfd", "Connect", mac, NULL};
-            (void)run_cmd_capture(conn_cmd, NULL, 0);
-            sleep_ms(400);
-            if (run_cmd_capture(bt_cmd, out, sizeof(out)) == 0 && out[0] != '\0' && out[0] != '\n') {
-                return true;
-            }
+            (void)run_cmd_capture_timeout(conn_cmd, NULL, 0, 150);
         }
     }
-
-    /* Also check BTstate: if > 1 on some firmwares, treat as connected. */
-    char *st_cmd[] = {"/usr/bin/lipc-get-prop", "com.lab126.btfd", "BTstate", NULL};
-    if (run_cmd_capture(st_cmd, out, sizeof(out)) == 0 && atoi(out) >= 2) {
-        return true;
-    }
-
-    if (err_msg && err_cap > 0) {
-        snprintf(err_msg, err_cap, "Connect headphones in Settings \xE2\x80\xBA Bluetooth");
-    }
-    return false;
 }
 
 static int gst_write_s16le(AudioOut *ao, const int16_t *frames, int frame_count) {
@@ -149,12 +182,29 @@ static int gst_write_s16le(AudioOut *ao, const int16_t *frames, int frame_count)
 
     const uint8_t *ptr = (const uint8_t *)frames;
     size_t remaining = (size_t)frame_count * DECODER_OUT_CHANNELS * sizeof(int16_t);
+    int stall_polls = 0;
     while (remaining > 0) {
         ssize_t n = write(im->pcm_fd, ptr, remaining);
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = {.fd = im->pcm_fd, .events = POLLOUT};
+                int pr = poll(&pfd, 1, 200);
+                if (pr > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                    return -EPIPE;
+                }
+                if (pr == 0) {
+                    if (++stall_polls >= 8) {
+                        /* Pipe buffer stayed full for > 1.6 s: mixersink is not draining
+                         * (e.g. Bluetooth headphones not connected). Fail cleanly! */
+                        return -ENOTCONN;
+                    }
+                }
+                continue;
+            }
             return -errno;
         }
+        stall_polls = 0;
         ptr += n;
         remaining -= (size_t)n;
     }
@@ -170,7 +220,7 @@ static int send_ctrl_cmd(GstAudioImpl *im, const char *cmd, char *reply, size_t 
     }
     if (reply && reply_cap > 0 && im->status_fd >= 0) {
         struct pollfd pfd = {.fd = im->status_fd, .events = POLLIN};
-        if (poll(&pfd, 1, 150) > 0 && (pfd.revents & POLLIN)) {
+        if (poll(&pfd, 1, 80) > 0 && (pfd.revents & POLLIN)) {
             ssize_t n = read(im->status_fd, reply, reply_cap - 1);
             if (n > 0) {
                 reply[n] = '\0';
@@ -200,20 +250,9 @@ static int gst_flush(AudioOut *ao) {
 }
 
 static int64_t gst_delay_ms(AudioOut *ao) {
-    if (!ao || !ao->impl) return 0;
-    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
-    char reply[64] = {0};
-    if (im->ctrl_fd >= 0 && send_ctrl_cmd(im, "POS\n", reply, sizeof(reply)) == 0) {
-        if (strncmp(reply, "POS ", 4) == 0) {
-            int64_t sink_ms = strtoll(reply + 4, NULL, 10);
-            int64_t written_ms = (im->frames_written * 1000) / DECODER_OUT_RATE;
-            if (sink_ms > 0 && written_ms >= sink_ms) {
-                int64_t d = written_ms - sink_ms;
-                return (d > 2000) ? 2000 : d;
-            }
-        }
-    }
-    /* Typical pipe + mixersink buffer latency fallback (D6). */
+    (void)ao;
+    /* Typical pipe + mixersink buffer latency estimate (D6). Avoid synchronous
+     * pipe round-trips here because player_get_snapshot() runs on the UI thread. */
     return 250;
 }
 
@@ -228,15 +267,10 @@ static void gst_close(AudioOut *ao) {
         if (im->pcm_fd >= 0) close(im->pcm_fd);
         if (im->status_fd >= 0) close(im->status_fd);
         if (im->pid > 0) {
-            int status = 0;
-            pid_t r = waitpid(im->pid, &status, WNOHANG);
-            if (r == 0) {
-                sleep_ms(50);
-                if (waitpid(im->pid, &status, WNOHANG) == 0) {
-                    kill(im->pid, SIGTERM);
-                    waitpid(im->pid, &status, 0);
-                }
-            }
+            reap_child_bounded(im->pid, 60);
+        }
+        if (im->fifo_path[0]) {
+            unlink(im->fifo_path);
         }
         free(im);
     }
@@ -248,9 +282,7 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     *out = NULL;
     if (err_msg && err_cap > 0) err_msg[0] = '\0';
 
-    if (!check_or_reconnect_bt(err_msg, err_cap)) {
-        return -ENOTCONN;
-    }
+    try_wake_bt_nonblocking();
 
     /* Pick armhf vs armel helper using KOReader's ld-linux-armhf.so.3 check (D6). */
     bool is_armhf = (access("/lib/ld-linux-armhf.so.3", F_OK) == 0);
@@ -265,16 +297,36 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
         have_helper = (access(helper_path, X_OK) == 0);
     }
 
+    /* Create a real named FIFO in /tmp so GStreamer's `filesrc location=...`
+     * sees a proper FIFO filesystem node (verified in LARK/KinAmp on Kindle).
+     * Opening with O_RDWR | O_NONBLOCK succeeds immediately without waiting
+     * for the child reader. */
+    const char *fifo_path = "/tmp/aloud_audio.fifo";
+    unlink(fifo_path);
+    int pcm_fd = -1;
     int pcm_pipe[2] = {-1, -1};
+    bool use_fifo = false;
+    if (mkfifo(fifo_path, 0666) == 0) {
+        pcm_fd = open(fifo_path, O_RDWR | O_NONBLOCK);
+        if (pcm_fd >= 0) {
+            use_fifo = true;
+        } else {
+            unlink(fifo_path);
+        }
+    }
+    if (!use_fifo) {
+        if (pipe(pcm_pipe) != 0) {
+            return -errno;
+        }
+        pcm_fd = pcm_pipe[1];
+    }
+
     int ctrl_pipe[2] = {-1, -1};
     int status_pipe[2] = {-1, -1};
-
-    if (pipe(pcm_pipe) != 0) {
-        return -errno;
-    }
     if (have_helper) {
         if (pipe(ctrl_pipe) != 0 || pipe(status_pipe) != 0) {
-            close(pcm_pipe[0]); close(pcm_pipe[1]);
+            if (use_fifo) { close(pcm_fd); unlink(fifo_path); }
+            else { close(pcm_pipe[0]); close(pcm_pipe[1]); }
             if (ctrl_pipe[0] >= 0) { close(ctrl_pipe[0]); close(ctrl_pipe[1]); }
             return -errno;
         }
@@ -283,48 +335,74 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     pid_t pid = fork();
     if (pid < 0) {
         int err = errno;
-        close(pcm_pipe[0]); close(pcm_pipe[1]);
+        if (use_fifo) { close(pcm_fd); unlink(fifo_path); }
+        else { close(pcm_pipe[0]); close(pcm_pipe[1]); }
         if (ctrl_pipe[0] >= 0) { close(ctrl_pipe[0]); close(ctrl_pipe[1]); }
         if (status_pipe[0] >= 0) { close(status_pipe[0]); close(status_pipe[1]); }
         return -err;
     }
 
     if (pid == 0) {
-        close(pcm_pipe[1]);
-        dup2(pcm_pipe[0], STDIN_FILENO);
-        close(pcm_pipe[0]);
+        if (use_fifo) {
+            close(pcm_fd);
+        } else {
+            close(pcm_pipe[1]);
+            dup2(pcm_pipe[0], STDIN_FILENO);
+            close(pcm_pipe[0]);
+        }
 
         if (have_helper) {
             close(ctrl_pipe[1]);
             close(status_pipe[0]);
+            close_inherited_fds_except(ctrl_pipe[0], status_pipe[1]);
             char cfd_str[16], sfd_str[16];
             snprintf(cfd_str, sizeof(cfd_str), "%d", ctrl_pipe[0]);
             snprintf(sfd_str, sizeof(sfd_str), "%d", status_pipe[1]);
-            execl(helper_path, "aloud-sink", "--ctrl-fd", cfd_str, "--status-fd", sfd_str, (char *)NULL);
+            if (use_fifo) {
+                execl(helper_path, "aloud-sink", "--fifo", fifo_path,
+                      "--ctrl-fd", cfd_str, "--status-fd", sfd_str, (char *)NULL);
+            } else {
+                execl(helper_path, "aloud-sink",
+                      "--ctrl-fd", cfd_str, "--status-fd", sfd_str, (char *)NULL);
+            }
         }
+
+        close_inherited_fds_except(-1, -1);
+
+        char loc_arg[128];
+        snprintf(loc_arg, sizeof(loc_arg), "location=%s", use_fifo ? fifo_path : "/dev/stdin");
 
         /* Fallback if helper could not start: firmware gst-launch CLI (D6). */
         if (access("/usr/lib/libgstreamer-1.0.so.0", F_OK) == 0) {
             execlp("gst-launch-1.0", "gst-launch-1.0", "-q",
-                   "filesrc", "location=/dev/stdin", "!",
+                   "filesrc", loc_arg, "!",
                    "audio/x-raw,format=S16LE,layout=interleaved,rate=44100,channels=2", "!",
                    "queue", "!", "mixersink", (char *)NULL);
         }
         execlp("gst-launch-0.10", "gst-launch-0.10", "-q",
-               "filesrc", "location=/dev/stdin", "!",
+               "filesrc", loc_arg, "!",
                "audio/x-raw-int,endianness=1234,signed=true,width=16,depth=16,rate=44100,channels=2", "!",
                "queue", "!", "mixersink", (char *)NULL);
         execlp("gst-launch", "gst-launch", "-q",
-               "filesrc", "location=/dev/stdin", "!",
+               "filesrc", loc_arg, "!",
                "audio/x-raw-int,endianness=1234,signed=true,width=16,depth=16,rate=44100,channels=2", "!",
                "queue", "!", "mixersink", (char *)NULL);
         _exit(127);
     }
 
-    close(pcm_pipe[0]);
+    if (!use_fifo && pcm_pipe[0] >= 0) {
+        close(pcm_pipe[0]);
+    }
+    int fl = fcntl(pcm_fd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(pcm_fd, F_SETFL, fl | O_NONBLOCK);
+
     if (have_helper) {
         close(ctrl_pipe[0]);
         close(status_pipe[1]);
+        int cfl = fcntl(ctrl_pipe[1], F_GETFL, 0);
+        if (cfl >= 0) (void)fcntl(ctrl_pipe[1], F_SETFL, cfl | O_NONBLOCK);
+        int sfl = fcntl(status_pipe[0], F_GETFL, 0);
+        if (sfl >= 0) (void)fcntl(status_pipe[0], F_SETFL, sfl | O_NONBLOCK);
     }
 
     AudioOut *ao = calloc(1, sizeof(*ao));
@@ -332,30 +410,32 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     if (!ao || !im) {
         free(ao);
         free(im);
-        close(pcm_pipe[1]);
+        close(pcm_fd);
+        if (use_fifo) unlink(fifo_path);
         if (ctrl_pipe[1] >= 0) close(ctrl_pipe[1]);
         if (status_pipe[0] >= 0) close(status_pipe[0]);
-        kill(pid, SIGTERM);
-        waitpid(pid, NULL, 0);
+        reap_child_bounded(pid, 40);
         return -ENOMEM;
     }
 
     im->pid = pid;
-    im->pcm_fd = pcm_pipe[1];
+    im->pcm_fd = pcm_fd;
     im->ctrl_fd = have_helper ? ctrl_pipe[1] : -1;
     im->status_fd = have_helper ? status_pipe[0] : -1;
+    if (use_fifo) {
+        snprintf(im->fifo_path, sizeof(im->fifo_path), "%s", fifo_path);
+    }
 
-    /* If using the helper, wait briefly for its READY/OK banner so we detect
-     * missing GStreamer or broken mixersink immediately. */
+    /* If using the helper, wait briefly (max 400 ms) for its READY/OK banner so we
+     * detect missing GStreamer or broken mixersink immediately. */
     if (have_helper && im->status_fd >= 0) {
         struct pollfd pfd = {.fd = im->status_fd, .events = POLLIN};
-        if (poll(&pfd, 1, 800) > 0 && (pfd.revents & POLLIN)) {
+        if (poll(&pfd, 1, 400) > 0 && (pfd.revents & POLLIN)) {
             char banner[128] = {0};
             ssize_t n = read(im->status_fd, banner, sizeof(banner) - 1);
             if (n <= 0 || strncmp(banner, "ERR", 3) == 0) {
                 if (err_msg && err_cap > 0) {
-                    snprintf(err_msg, err_cap, "Audio sink unavailable (%s)",
-                             banner[0] ? banner : "helper exited");
+                    snprintf(err_msg, err_cap, "Connect Bluetooth headphones in Kindle Settings");
                 }
                 ao->impl = im;
                 ao->close = gst_close;

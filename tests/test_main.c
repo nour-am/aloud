@@ -275,6 +275,12 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     int w2 = text_measure_width(ts, FONT_SANS_REGULAR, 32, "08:49", TEXT_FLAG_TABULAR);
     CHECK(w1 > 0 && w1 == w2, "tabular figures have identical width (%d vs %d)", w1, w2);
 
+    /* Arabic fallback font + NFC Hamza composition + contextual joining check. */
+    int w_ar_nfc = text_measure_width(ts, FONT_SERIF_BOLD, 36, "أبي الذي أكره", TEXT_FLAG_NONE);
+    int w_ar_nfd = text_measure_width(ts, FONT_SERIF_BOLD, 36, "ا\xD9\x94" "بي الذي ا\xD9\x94" "كره", TEXT_FLAG_NONE);
+    CHECK(w_ar_nfc > 80 && w_ar_nfc == w_ar_nfd,
+          "Arabic NFC & NFD titles shape identically (%d == %d)", w_ar_nfc, w_ar_nfd);
+
     char lib_dir[1024], state_dir[1024];
     snprintf(lib_dir, sizeof(lib_dir), "%s/library", fixture_dir);
     snprintf(state_dir, sizeof(state_dir), "%s/state", fixture_dir);
@@ -361,6 +367,44 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     };
     CHECK(ui_handle_event(&ui, tap_chaps, &rect, &wfm), "tap chapters");
     CHECK(ui.screen == UI_SCREEN_CHAPTERS, "on Chapters screen");
+
+    /* Test store_set_library_dir persistence and UI folder picker screen. */
+    ui_set_storage(&ui, &store, state_dir, lib_dir);
+    ui.screen = UI_SCREEN_LIBRARY;
+    ui_render_full(&ui, false, &rect, &wfm);
+    CHECK(ui.hit_header_center.w > 0, "Library header has Folder picker button");
+
+    AloudInputEvent tap_folder_btn = {
+        .type = ALOUD_EV_TAP,
+        .x = ui.hit_header_center.x + ui.hit_header_center.w / 2,
+        .y = ui.hit_header_center.y + ui.hit_header_center.h / 2
+    };
+    CHECK(ui_handle_event(&ui, tap_folder_btn, &rect, &wfm), "tap Folder button opens folder picker");
+    CHECK(ui.screen == UI_SCREEN_FOLDERS, "navigated to UI_SCREEN_FOLDERS");
+    CHECK(ui.folder_count > 0, "folder picker discovered subdirectories in %s", ui.browse_dir);
+
+    /* Tap 'Use Current' or 'Use Folder' to select the library directory and persist it. */
+    ui_open_folder_picker(&ui, lib_dir);
+    ui_render_full(&ui, false, &rect, &wfm);
+    AloudInputEvent tap_use_cur = {
+        .type = ALOUD_EV_TAP,
+        .x = ui.hit_use_current_dir.x + ui.hit_use_current_dir.w / 2,
+        .y = ui.hit_use_current_dir.y + ui.hit_use_current_dir.h / 2
+    };
+    CHECK(ui_handle_event(&ui, tap_use_cur, &rect, &wfm), "tap Use Current selects folder");
+    CHECK(ui.screen == UI_SCREEN_LIBRARY, "returned to Library after choosing folder");
+    CHECK(store_get_library_dir(&store) != NULL &&
+          strcmp(store_get_library_dir(&store), lib_dir) == 0,
+          "selected library_dir persisted in Store (%s)",
+          store_get_library_dir(&store) ? store_get_library_dir(&store) : "NULL");
+
+    Store reloaded_store;
+    store_init(&reloaded_store);
+    CHECK(store_load(&reloaded_store, state_dir) == 0, "reload store with library_dir.txt");
+    CHECK(store_get_library_dir(&reloaded_store) != NULL &&
+          strcmp(store_get_library_dir(&reloaded_store), lib_dir) == 0,
+          "reloaded store preserved library_dir (%s)",
+          store_get_library_dir(&reloaded_store) ? store_get_library_dir(&reloaded_store) : "NULL");
 
     /* Also verify KT4 (600x800 @ 167 DPI) non-overlap. */
     Canvas kt4_canvas;

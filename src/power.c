@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 void power_init(PowerMonitor *pm) {
@@ -18,6 +19,12 @@ void power_init(PowerMonitor *pm) {
     const char *env = getenv("ALOUD_PREVENT_SCREENSAVER");
     if (env && strcmp(env, "1") == 0) {
         pm->prevent_screensaver_fallback = true;
+    }
+}
+
+static void close_inherited_fds(void) {
+    for (int fd = 3; fd < 64; fd++) {
+        close(fd);
     }
 }
 
@@ -33,11 +40,18 @@ static void run_lipc_set_int(const char *prop, int val) {
             dup2(devnull, STDERR_FILENO);
             close(devnull);
         }
+        close_inherited_fds();
         execl("/usr/bin/lipc-set-prop", "lipc-set-prop", "-i",
               "com.lab126.powerd", prop, val_str, (char *)NULL);
         _exit(127);
     } else if (pid > 0) {
-        waitpid(pid, NULL, 0);
+        for (int i = 0; i < 20; i++) {
+            if (waitpid(pid, NULL, WNOHANG) != 0) return;
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 10000000L};
+            nanosleep(&ts, NULL);
+        }
+        kill(pid, SIGKILL);
+        (void)waitpid(pid, NULL, WNOHANG);
     }
 }
 
@@ -71,6 +85,7 @@ int power_start(PowerMonitor *pm) {
             close(devnull);
         }
         close(pfd[1]);
+        close_inherited_fds();
         execl("/usr/bin/lipc-wait-event", "lipc-wait-event", "-m", "-s", "0",
               "com.lab126.powerd",
               "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,readyToSuspend,wakeupFromSuspend,suspending",
@@ -99,8 +114,12 @@ void power_stop(PowerMonitor *pm) {
         pm->event_fd = -1;
     }
     if (pm->wait_pid > 0) {
-        kill(pm->wait_pid, SIGTERM);
-        waitpid(pm->wait_pid, NULL, 0);
+        kill(pm->wait_pid, SIGKILL);
+        for (int i = 0; i < 10; i++) {
+            if (waitpid(pm->wait_pid, NULL, WNOHANG) != 0) break;
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 5000000L};
+            nanosleep(&ts, NULL);
+        }
         pm->wait_pid = -1;
     }
 }

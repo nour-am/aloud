@@ -21,17 +21,22 @@ typedef struct {
     StoreEntry entries[STORE_MAX_ENTRIES];
     size_t count;
     bool recovered_from_bak;
+    char library_dir[1024];
 } Store;
 
 void store_init(Store *s);
 
-/* Load positions.tsv from state_dir. If missing or corrupt, falls back to
- * positions.tsv.bak (D8). Never fails on missing directory/files (starts empty). */
+/* Load positions.tsv (and library_dir.txt if present) from state_dir. If missing
+ * or corrupt, falls back to positions.tsv.bak (D8). Never fails on missing directory/files. */
 int store_load(Store *s, const char *state_dir);
 
 /* Atomically save positions.tsv via .tmp -> fsync -> rename -> fsync(dir),
  * keeping the previous valid positions.tsv as positions.tsv.bak (D8). */
 int store_save(const Store *s, const char *state_dir);
+
+/* Get/set the user's chosen audiobook directory (persisted in state_dir/library_dir.txt). */
+const char *store_get_library_dir(const Store *s);
+int store_set_library_dir(Store *s, const char *state_dir, const char *library_dir);
 
 const StoreEntry *store_get(const Store *s, const char *key);
 

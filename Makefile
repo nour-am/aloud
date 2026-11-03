@@ -84,6 +84,7 @@ sim: build/host/aloud-sim
 		--fonts third_party/fonts \
 		--export-screens tests/golden
 	cp tests/golden/pw5_library.png docs/screens/library.png
+	cp tests/golden/pw5_folders.png docs/screens/folders.png
 	cp tests/golden/pw5_player.png docs/screens/player.png
 	cp tests/golden/pw5_chapters.png docs/screens/chapters.png
 	cp tests/golden/pw5_sheet_speed.png docs/screens/sheet_speed.png
@@ -129,13 +130,10 @@ kindle: build/kindle/aloud build/kindle/aloud-sink-armel build/kindle/aloud-sink
 
 package: kindle
 	@rm -rf build/pkg dist/aloud-$(VERSION).zip
-	@mkdir -p build/pkg/documents \
-		build/pkg/extensions/aloud/bin \
+	@mkdir -p build/pkg/extensions/aloud/bin \
 		build/pkg/extensions/aloud/fonts \
 		build/pkg/audiobooks \
 		dist
-	cp package/scriptlet.sh build/pkg/documents/Aloud.sh
-	chmod +x build/pkg/documents/Aloud.sh
 	cp package/config.xml build/pkg/extensions/aloud/config.xml
 	cp package/menu.json build/pkg/extensions/aloud/menu.json
 	cp package/launcher.sh build/pkg/extensions/aloud/aloud.sh
@@ -152,10 +150,15 @@ package: kindle
 	   third_party/fonts/Inter-Regular.ttf \
 	   third_party/fonts/Inter-SemiBold.ttf \
 	   third_party/fonts/Inter-OFL.txt \
+	   third_party/fonts/NotoNaskhArabic-Regular.ttf \
+	   third_party/fonts/NotoNaskhArabic-Bold.ttf \
+	   third_party/fonts/NotoSansArabicUI-Regular.ttf \
+	   third_party/fonts/NotoSansArabicUI-Bold.ttf \
+	   third_party/fonts/Noto-OFL.txt \
 	   build/pkg/extensions/aloud/fonts/
 	cp package/audiobooks-README.txt build/pkg/audiobooks/README.txt
 	cp LICENSE build/pkg/extensions/aloud/LICENSE.txt
-	cd build/pkg && zip -q -r ../../dist/aloud-$(VERSION).zip documents extensions audiobooks
+	cd build/pkg && zip -q -r ../../dist/aloud-$(VERSION).zip extensions audiobooks
 	@ls -lh dist/aloud-$(VERSION).zip
 
 clean:

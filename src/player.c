@@ -35,6 +35,7 @@ struct Player {
     sonicStream sonic;
     AudioOut *ao;
     bool using_sim_ao;
+    bool ao_busy;
 
     bool playing;
     bool paused_once; /* True after a pause so resume rewinds 2 s (D6) */
@@ -55,6 +56,7 @@ struct Player {
     /* Preallocated hot-path buffers (zero malloc in audio thread per Conventions). */
     int16_t decode_buf[PLAYER_CHUNK_FRAMES * DECODER_OUT_CHANNELS];
     int16_t sonic_buf[PLAYER_CHUNK_FRAMES * 4 * DECODER_OUT_CHANNELS];
+    int16_t write_buf[PLAYER_CHUNK_FRAMES * DECODER_OUT_CHANNELS];
 };
 
 static int64_t now_epoch_sec(void) {
@@ -129,7 +131,7 @@ static int open_current_file_locked(Player *p, int64_t seek_ms) {
     int rc = decoder_open(&p->dec, bf->fullpath);
     if (rc < 0) {
         snprintf(p->toast, sizeof(p->toast),
-                 "Can't play '%s' — skipped", bf->title[0] ? bf->title : "file");
+                 "Can't play '%s' \u2014 skipped", bf->title[0] ? bf->title : "file");
         return rc;
     }
     if (seek_ms > 0) {
@@ -148,16 +150,30 @@ static int open_current_file_locked(Player *p, int64_t seek_ms) {
 
 static int ensure_audio_out_locked(Player *p) {
     if (p->ao) return 0;
+    char helper_dir[1024];
+    snprintf(helper_dir, sizeof(helper_dir), "%s", p->helper_dir);
+    p->ao_busy = true;
+    pthread_mutex_unlock(&p->mu);
+
+    AudioOut *new_ao = NULL;
     char err_msg[256] = {0};
-    int rc = audio_out_open_kindle(&p->ao, p->helper_dir, err_msg, sizeof(err_msg));
-    if (rc < 0) {
+    int rc = audio_out_open_kindle(&new_ao, helper_dir, err_msg, sizeof(err_msg));
+
+    pthread_mutex_lock(&p->mu);
+    p->ao_busy = false;
+    if (rc < 0 || !new_ao) {
         if (err_msg[0]) {
             snprintf(p->toast, sizeof(p->toast), "%s", err_msg);
         } else {
-            snprintf(p->toast, sizeof(p->toast), "No audio output — check Bluetooth settings");
+            snprintf(p->toast, sizeof(p->toast), "No audio output \u2014 connect Bluetooth headphones");
         }
-        return rc;
+        return (rc < 0) ? rc : -ENOTCONN;
     }
+    if (p->ao) {
+        audio_out_close(new_ao);
+        return 0;
+    }
+    p->ao = new_ao;
     return 0;
 }
 
@@ -178,6 +194,9 @@ static int step_frames_locked(Player *p, int max_out_frames) {
             p->playing = false;
             notify_main_locked(p);
             return -ENOTCONN;
+        }
+        if (!p->playing) {
+            return 0;
         }
     }
 
@@ -208,9 +227,6 @@ static int step_frames_locked(Player *p, int max_out_frames) {
                     p->sleep_mode = SLEEP_OFF;
                     p->playing = false;
                     p->paused_once = true;
-                    if (p->ao && p->ao->set_paused) {
-                        (void)p->ao->set_paused(p->ao, true);
-                    }
                     save_position_locked(p);
                     notify_main_locked(p);
                     return 0;
@@ -262,19 +278,35 @@ static int step_frames_locked(Player *p, int max_out_frames) {
         gain *= fade;
     }
 
+    int total_samples = got * DECODER_OUT_CHANNELS;
     if (fabsf(gain - 1.0f) > 0.001f) {
-        int total_samples = got * DECODER_OUT_CHANNELS;
         for (int i = 0; i < total_samples; i++) {
             int32_t v = (int32_t)lroundf((float)p->sonic_buf[i] * gain);
             if (v > 32767) v = 32767;
             if (v < -32768) v = -32768;
-            p->sonic_buf[i] = (int16_t)v;
+            p->write_buf[i] = (int16_t)v;
         }
+    } else {
+        memcpy(p->write_buf, p->sonic_buf, (size_t)total_samples * sizeof(int16_t));
     }
 
-    int wrc = p->ao->write_s16le(p->ao, p->sonic_buf, got);
+    /* Release p->mu while writing PCM to the audio sink so the UI thread never blocks
+     * waiting for the audio pipe to drain. */
+    AudioOut *ao = p->ao;
+    p->ao_busy = true;
+    pthread_mutex_unlock(&p->mu);
+
+    int wrc = ao->write_s16le(ao, p->write_buf, got);
+
+    pthread_mutex_lock(&p->mu);
+    p->ao_busy = false;
     if (wrc < 0) {
-        snprintf(p->toast, sizeof(p->toast), "Audio output disconnected");
+        if (!p->using_sim_ao && p->ao) {
+            audio_out_close(p->ao);
+            p->ao = NULL;
+        }
+        snprintf(p->toast, sizeof(p->toast),
+                 "No audio output \u2014 connect Bluetooth headphones");
         p->playing = false;
         save_position_locked(p);
         notify_main_locked(p);
@@ -309,9 +341,6 @@ static int step_frames_locked(Player *p, int max_out_frames) {
             p->sleep_mode = SLEEP_OFF;
             p->playing = false;
             p->paused_once = true;
-            if (p->ao && p->ao->set_paused) {
-                (void)p->ao->set_paused(p->ao, true);
-            }
             save_position_locked(p);
             notify_main_locked(p);
         }
@@ -517,9 +546,6 @@ static int seek_book_locked(Player *p, int64_t target_book_ms) {
         update_book_pos_and_chapter_locked(p);
     }
 
-    if (p->ao && p->ao->flush) {
-        (void)p->ao->flush(p->ao);
-    }
     if (target_book_ms < p->book->total_duration_ms) {
         p->finished = false;
     }
@@ -547,13 +573,15 @@ int player_play(Player *p) {
         (void)seek_book_locked(p, rew);
     }
 
-    int rc = ensure_audio_out_locked(p);
-    if (rc < 0) {
-        pthread_mutex_unlock(&p->mu);
-        return rc;
-    }
-    if (p->ao && p->ao->set_paused) {
-        (void)p->ao->set_paused(p->ao, false);
+    /* Only open audio synchronously when running single-threaded (e.g. unit tests);
+     * when the background audio thread is active, it opens audio asynchronously in
+     * step_frames_locked() so tapping Play never blocks the UI thread! */
+    if (!p->thread_running && !p->ao) {
+        int rc = ensure_audio_out_locked(p);
+        if (rc < 0) {
+            pthread_mutex_unlock(&p->mu);
+            return rc;
+        }
     }
 
     p->playing = true;
@@ -573,9 +601,6 @@ int player_pause(Player *p) {
     p->playing = false;
     p->paused_once = true;
     p->paused_idle_ms = 0;
-    if (p->ao && p->ao->set_paused) {
-        (void)p->ao->set_paused(p->ao, true);
-    }
     save_position_locked(p);
     pthread_mutex_unlock(&p->mu);
     return 0;
@@ -702,7 +727,7 @@ int player_set_sleep_timer(Player *p, int sleep_mode) {
 void player_housekeeping_tick(Player *p, int64_t elapsed_wall_ms) {
     if (!p || elapsed_wall_ms <= 0) return;
     pthread_mutex_lock(&p->mu);
-    if (!p->playing && p->ao && !p->using_sim_ao) {
+    if (!p->playing && !p->ao_busy && p->ao && !p->using_sim_ao) {
         p->paused_idle_ms += elapsed_wall_ms;
         /* After 2 min paused, stop the helper entirely so the mixer/BT path can idle (D6). */
         if (p->paused_idle_ms >= PLAYER_IDLE_SINK_CLOSE_MS) {

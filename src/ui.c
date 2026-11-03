@@ -2,11 +2,15 @@
 #include "ui.h"
 #include "icons.h"
 
+#include <dirent.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 const int kUiSpeedOptions[UI_SPEED_OPTION_COUNT] = {
     75, 100, 110, 125, 150, 175, 200, 250, 300
@@ -89,6 +93,8 @@ int ui_init(Ui *ui, Canvas *canvas, TextSystem *text, Library *library,
     ui->sheet = UI_SHEET_NONE;
     ui->last_drawn_minute = -1;
     ui->last_drawn_sleep_min = -1;
+    snprintf(ui->library_dir, sizeof(ui->library_dir), "/mnt/us/audiobooks");
+    snprintf(ui->browse_dir, sizeof(ui->browse_dir), "/mnt/us");
     return 0;
 }
 
@@ -100,11 +106,14 @@ void ui_free(Ui *ui) {
 
 static void clear_hit_boxes(Ui *ui) {
     memset(&ui->hit_header_left, 0, sizeof(AloudRect));
+    memset(&ui->hit_header_center, 0, sizeof(AloudRect));
     memset(&ui->hit_header_right, 0, sizeof(AloudRect));
     memset(&ui->hit_page_prev, 0, sizeof(AloudRect));
     memset(&ui->hit_page_next, 0, sizeof(AloudRect));
     memset(ui->hit_list_rows, 0, sizeof(ui->hit_list_rows));
+    memset(ui->hit_folder_select, 0, sizeof(ui->hit_folder_select));
     ui->hit_list_row_count = 0;
+    memset(&ui->hit_use_current_dir, 0, sizeof(AloudRect));
 
     memset(&ui->hit_scrubber, 0, sizeof(AloudRect));
     memset(&ui->hit_prev_chap, 0, sizeof(AloudRect));
@@ -122,6 +131,209 @@ static void clear_hit_boxes(Ui *ui) {
     memset(&ui->hit_sheet_close, 0, sizeof(AloudRect));
     memset(ui->hit_sheet_opts, 0, sizeof(ui->hit_sheet_opts));
     ui->hit_sheet_opt_count = 0;
+}
+
+static bool is_ignored_system_folder(const char *name) {
+    if (!name || name[0] == '\0' || name[0] == '.') return true;
+    static const char *const kIgnore[] = {
+        "$RECYCLE.BIN", "System Volume Information", "lost+found",
+        "system", "extensions", "koreader", "LARK", "libkh",
+        "mrpackages", "update.bin.tmp.partial", NULL
+    };
+    for (int i = 0; kIgnore[i]; i++) {
+        if (strcasecmp(name, kIgnore[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* Fast 2-level count of audio files & child subdirectories inside dir_path (no FFmpeg open). */
+static void inspect_folder_contents(const char *dir_path, int *out_audio, int *out_subdirs) {
+    int audio = 0;
+    int subdirs = 0;
+    DIR *d = opendir(dir_path);
+    if (!d) {
+        if (out_audio) *out_audio = 0;
+        if (out_subdirs) *out_subdirs = 0;
+        return;
+    }
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        if (lib_is_supported_audio_ext(de->d_name)) {
+            audio++;
+            continue;
+        }
+        char child[1024];
+        snprintf(child, sizeof(child), "%s/%s", dir_path, de->d_name);
+        struct stat st;
+        if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (!is_ignored_system_folder(de->d_name)) {
+                subdirs++;
+            }
+            /* Also check 1 level deeper so folders of multi-file MP3 books count as audio! */
+            DIR *sub = opendir(child);
+            if (sub) {
+                struct dirent *sde;
+                while ((sde = readdir(sub)) != NULL) {
+                    if (sde->d_name[0] != '.' && lib_is_supported_audio_ext(sde->d_name)) {
+                        audio++;
+                    }
+                }
+                closedir(sub);
+            }
+        }
+    }
+    closedir(d);
+    if (out_audio) *out_audio = audio;
+    if (out_subdirs) *out_subdirs = subdirs;
+}
+
+static int cmp_folder_entries(const void *a, const void *b) {
+    const UiFolderEntry *fa = (const UiFolderEntry *)a;
+    const UiFolderEntry *fb = (const UiFolderEntry *)b;
+    if (fa->is_parent != fb->is_parent) {
+        return fa->is_parent ? -1 : 1;
+    }
+    bool a_has = (fa->audio_count > 0);
+    bool b_has = (fb->audio_count > 0);
+    if (a_has != b_has) {
+        return a_has ? -1 : 1;
+    }
+    return strcasecmp(fa->name, fb->name);
+}
+
+static void scan_browse_dir(Ui *ui, const char *requested_dir) {
+    if (!ui) return;
+    char norm[1024];
+    if (requested_dir && requested_dir[0]) {
+        snprintf(norm, sizeof(norm), "%s", requested_dir);
+    } else if (ui->library_dir[0]) {
+        snprintf(norm, sizeof(norm), "%s", ui->library_dir);
+    } else {
+        snprintf(norm, sizeof(norm), "/mnt/us");
+    }
+    size_t len = strlen(norm);
+    while (len > 1 && norm[len - 1] == '/') {
+        norm[--len] = '\0';
+    }
+
+    /* If norm doesn't exist yet on disk, walk up to its parent directory. */
+    struct stat st;
+    if (stat(norm, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        char *slash = strrchr(norm, '/');
+        if (slash && slash != norm) {
+            *slash = '\0';
+        } else if (access("/mnt/us", F_OK) == 0) {
+            snprintf(norm, sizeof(norm), "/mnt/us");
+        } else {
+            snprintf(norm, sizeof(norm), ".");
+        }
+    }
+
+    snprintf(ui->browse_dir, sizeof(ui->browse_dir), "%s", norm);
+    ui->folder_count = 0;
+    ui->folder_page = 0;
+
+    /* Add ".. (Parent folder)" if not at root "/" or "/mnt/us". */
+    if (strcmp(norm, "/") != 0 && strcmp(norm, ".") != 0 && strcmp(norm, "/mnt/us") != 0) {
+        char parent[1024];
+        snprintf(parent, sizeof(parent), "%s", norm);
+        char *slash = strrchr(parent, '/');
+        if (slash) {
+            if (slash == parent) parent[1] = '\0';
+            else *slash = '\0';
+            UiFolderEntry *e = &ui->folders[ui->folder_count++];
+            memset(e, 0, sizeof(*e));
+            snprintf(e->name, sizeof(e->name), ".. (Up to %s)", parent);
+            snprintf(e->fullpath, sizeof(e->fullpath), "%s", parent);
+            e->is_parent = true;
+        }
+    }
+
+    /* If browsing /mnt/us and /mnt/us/audiobooks doesn't exist yet, offer it first. */
+    if (strcmp(norm, "/mnt/us") == 0 && access("/mnt/us/audiobooks", F_OK) != 0 &&
+        ui->folder_count < UI_MAX_FOLDERS) {
+        UiFolderEntry *e = &ui->folders[ui->folder_count++];
+        memset(e, 0, sizeof(*e));
+        snprintf(e->name, sizeof(e->name), "audiobooks (Default)");
+        snprintf(e->fullpath, sizeof(e->fullpath), "/mnt/us/audiobooks");
+    }
+
+    DIR *d = opendir(norm);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL && ui->folder_count < UI_MAX_FOLDERS) {
+            if (is_ignored_system_folder(de->d_name)) continue;
+            char full[1024];
+            snprintf(full, sizeof(full), "%s/%s",
+                     (strcmp(norm, "/") == 0) ? "" : norm, de->d_name);
+            struct stat cst;
+            if (stat(full, &cst) != 0 || !S_ISDIR(cst.st_mode)) continue;
+
+            UiFolderEntry *e = &ui->folders[ui->folder_count++];
+            memset(e, 0, sizeof(*e));
+            snprintf(e->name, sizeof(e->name), "%s", de->d_name);
+            snprintf(e->fullpath, sizeof(e->fullpath), "%s", full);
+            inspect_folder_contents(full, &e->audio_count, &e->subdir_count);
+        }
+        closedir(d);
+    }
+
+    if (ui->folder_count > 1) {
+        qsort(ui->folders, (size_t)ui->folder_count, sizeof(UiFolderEntry), cmp_folder_entries);
+    }
+}
+
+void ui_set_storage(Ui *ui, Store *store, const char *state_dir, const char *library_dir) {
+    if (!ui) return;
+    ui->store = store;
+    if (state_dir) {
+        snprintf(ui->state_dir, sizeof(ui->state_dir), "%s", state_dir);
+    }
+    if (library_dir && library_dir[0]) {
+        snprintf(ui->library_dir, sizeof(ui->library_dir), "%s", library_dir);
+    }
+}
+
+void ui_open_folder_picker(Ui *ui, const char *start_dir) {
+    if (!ui) return;
+    const char *base = start_dir;
+    if (!base || !base[0]) {
+        /* Start at parent of current library_dir (e.g. /mnt/us) so the user sees all
+         * top-level folders on their Kindle USB drive right away! */
+        static char parent_buf[1024];
+        if (ui->library_dir[0]) {
+            snprintf(parent_buf, sizeof(parent_buf), "%s", ui->library_dir);
+            char *slash = strrchr(parent_buf, '/');
+            if (slash && slash != parent_buf) {
+                *slash = '\0';
+                base = parent_buf;
+            } else {
+                base = ui->library_dir;
+            }
+        } else {
+            base = "/mnt/us";
+        }
+    }
+    scan_browse_dir(ui, base);
+    ui->screen = UI_SCREEN_FOLDERS;
+    ui->sheet = UI_SHEET_NONE;
+}
+
+static void select_library_folder(Ui *ui, const char *chosen_dir) {
+    if (!ui || !chosen_dir || !chosen_dir[0]) return;
+    (void)mkdir(chosen_dir, 0755);
+    snprintf(ui->library_dir, sizeof(ui->library_dir), "%s", chosen_dir);
+    if (ui->store) {
+        (void)store_set_library_dir(ui->store, ui->state_dir[0] ? ui->state_dir : NULL, chosen_dir);
+    }
+    if (ui->library) {
+        (void)lib_scan(ui->library, chosen_dir,
+                       ui->state_dir[0] ? ui->state_dir : NULL, ui->store);
+    }
+    ui->lib_page = 0;
+    ui->screen = UI_SCREEN_LIBRARY;
+    ui->sheet = UI_SHEET_NONE;
 }
 
 /* Draw a cover (or refined typographic bookplate placeholder when no art exists). */
@@ -239,13 +451,36 @@ static void render_library_screen(Ui *ui) {
     int rule_px = canvas_mm_to_px(c, 0.28f);
     if (rule_px < 1) rule_px = 1;
 
-    /* Header: "Library" (sans, bold) left; "✕ Exit" right (DESIGN.md). */
+    /* Header: "Library" (sans, bold) left; "[Folder: ...]" center; "✕ Exit" right. */
     int hdr_font = canvas_mm_to_px(c, 4.6f);
     int sub_font = canvas_mm_to_px(c, 3.3f);
     int hdr_lh = text_line_height(ui->text, FONT_SANS_BOLD, hdr_font);
     text_draw_line(ui->text, c, FONT_SANS_BOLD, hdr_font,
-                   margin, (header_h - hdr_lh) / 2, c->width / 2,
+                   margin, (header_h - hdr_lh) / 2, c->width / 3,
                    "Library", TONE_BLACK, TEXT_ALIGN_LEFT);
+
+    /* Center header button: Change Audiobook Folder. */
+    const char *dir_base = strrchr(ui->library_dir, '/');
+    dir_base = (dir_base && dir_base[1]) ? (dir_base + 1) : ui->library_dir;
+    char folder_btn_lbl[128];
+    snprintf(folder_btn_lbl, sizeof(folder_btn_lbl), "Folder: %s", dir_base);
+    int fbtn_font = canvas_mm_to_px(c, 2.8f);
+    int fbtn_lh = text_line_height(ui->text, FONT_SANS_BOLD, fbtn_font);
+    int fbtn_tw = text_measure_width(ui->text, FONT_SANS_BOLD, fbtn_font, folder_btn_lbl, 0);
+    int fbtn_w = fbtn_tw + canvas_mm_to_px(c, 6.0f);
+    int max_fbtn_w = (c->width * 42) / 100;
+    if (fbtn_w > max_fbtn_w) fbtn_w = max_fbtn_w;
+    if (fbtn_w < canvas_mm_to_px(c, 26.0f)) fbtn_w = canvas_mm_to_px(c, 26.0f);
+    int fbtn_h = canvas_mm_to_px(c, 7.8f);
+    int fbtn_x = (c->width - fbtn_w) / 2;
+    int fbtn_y = (header_h - fbtn_h) / 2;
+    ui->hit_header_center = (AloudRect){fbtn_x, 0, fbtn_w, header_h};
+    canvas_stroke_round_rect(c, fbtn_x, fbtn_y, fbtn_w, fbtn_h,
+                             canvas_mm_to_px(c, 1.4f), rule_px, TONE_BLACK);
+    text_draw_line(ui->text, c, FONT_SANS_BOLD, fbtn_font,
+                   fbtn_x + canvas_mm_to_px(c, 2.0f), fbtn_y + (fbtn_h - fbtn_lh) / 2,
+                   fbtn_w - canvas_mm_to_px(c, 4.0f),
+                   folder_btn_lbl, TONE_BLACK, TEXT_ALIGN_CENTER);
 
     int exit_w = canvas_mm_to_px(c, 20.0f);
     ui->hit_header_right = (AloudRect){c->width - margin - exit_w, 0, exit_w, header_h};
@@ -269,14 +504,30 @@ static void render_library_screen(Ui *ui) {
     if (ui->library->count == 0) {
         int empty_title_px = canvas_mm_to_px(c, 4.8f);
         int empty_sub_px = canvas_mm_to_px(c, 3.2f);
-        int cy = body_y + body_h / 2 - canvas_mm_to_px(c, 6.0f);
+        int cy = body_y + body_h / 2 - canvas_mm_to_px(c, 12.0f);
         text_draw_line(ui->text, c, FONT_SERIF_BOLD, empty_title_px,
                        margin, cy, c->width - margin * 2,
-                       "No audiobooks yet", TONE_BLACK, TEXT_ALIGN_CENTER);
+                       "No audiobooks in this folder", TONE_BLACK, TEXT_ALIGN_CENTER);
+        char empty_msg[1100];
+        snprintf(empty_msg, sizeof(empty_msg),
+                 "Current folder: %s", ui->library_dir);
         text_draw_line(ui->text, c, FONT_SANS_REGULAR, empty_sub_px,
                        margin, cy + canvas_mm_to_px(c, 8.0f), c->width - margin * 2,
-                       "Copy M4B files or MP3 folders into /mnt/us/audiobooks over USB.",
-                       TONE_INK_GRAY, TEXT_ALIGN_CENTER);
+                       empty_msg, TONE_INK_GRAY, TEXT_ALIGN_CENTER);
+
+        int pick_w = canvas_mm_to_px(c, 64.0f);
+        if (pick_w > c->width - margin * 4) pick_w = c->width - margin * 4;
+        int pick_h = canvas_mm_to_px(c, 11.0f);
+        int pick_x = (c->width - pick_w) / 2;
+        int pick_y = cy + canvas_mm_to_px(c, 16.5f);
+        ui->hit_use_current_dir = (AloudRect){pick_x, pick_y, pick_w, pick_h};
+        canvas_fill_round_rect(c, pick_x, pick_y, pick_w, pick_h,
+                               canvas_mm_to_px(c, 1.8f), TONE_BLACK);
+        int pick_lh = text_line_height(ui->text, FONT_SANS_BOLD, sub_font);
+        text_draw_line(ui->text, c, FONT_SANS_BOLD, sub_font,
+                       pick_x, pick_y + (pick_h - pick_lh) / 2, pick_w,
+                       "Choose Audiobook Folder...", TONE_WHITE, TEXT_ALIGN_CENTER);
+
         render_pagination_footer(ui, c->height - footer_h, footer_h, 0, 1);
         return;
     }
@@ -858,6 +1109,7 @@ static void render_player_screen(Ui *ui) {
 
     ui->last_drawn_minute = (int)(snap.book_pos_ms / 60000);
     ui->last_drawn_sleep_min = (snap.sleep_rem_ms > 0) ? (int)((snap.sleep_rem_ms + 59999) / 60000) : 0;
+    ui->last_drawn_playing = snap.playing;
 }
 
 static void render_chapters_screen(Ui *ui) {
@@ -961,6 +1213,173 @@ static void render_chapters_screen(Ui *ui) {
     render_pagination_footer(ui, c->height - footer_h, footer_h, ui->chap_page, total_pages);
 }
 
+static void render_folders_screen(Ui *ui) {
+    Canvas *c = ui->canvas;
+    canvas_clear(c, TONE_WHITE);
+
+    if (ui->browse_dir[0] == '\0') {
+        scan_browse_dir(ui, "/mnt/us");
+    }
+
+    int margin = canvas_mm_to_px(c, 5.5f);
+    int header_h = canvas_mm_to_px(c, 13.0f);
+    int banner_h = canvas_mm_to_px(c, 14.5f);
+    int footer_h = canvas_mm_to_px(c, 12.5f);
+    int rule_px = canvas_mm_to_px(c, 0.28f);
+    if (rule_px < 1) rule_px = 1;
+
+    /* Top bar: "‹ Library" left, "Choose Audiobook Folder" center, "✕ Exit" right. */
+    int nav_px = canvas_mm_to_px(c, 3.2f);
+    int nav_lh = text_line_height(ui->text, FONT_SANS_BOLD, nav_px);
+    int chev_sz = canvas_mm_to_px(c, 3.8f);
+    int nav_w = canvas_mm_to_px(c, 24.0f);
+
+    ui->hit_header_left = (AloudRect){margin, 0, nav_w, header_h};
+    icon_draw(c, ICON_CHEVRON_LEFT, margin, (header_h - chev_sz) / 2, chev_sz, TONE_BLACK);
+    text_draw_line(ui->text, c, FONT_SANS_BOLD, nav_px,
+                   margin + chev_sz + canvas_mm_to_px(c, 1.0f),
+                   (header_h - nav_lh) / 2, nav_w - chev_sz,
+                   "Library", TONE_BLACK, TEXT_ALIGN_LEFT);
+
+    int hdr_px = canvas_mm_to_px(c, 3.8f);
+    int hdr_lh = text_line_height(ui->text, FONT_SANS_BOLD, hdr_px);
+    text_draw_line(ui->text, c, FONT_SANS_BOLD, hdr_px,
+                   margin + nav_w, (header_h - hdr_lh) / 2, c->width - (margin + nav_w) * 2,
+                   "Choose Audiobook Folder", TONE_BLACK, TEXT_ALIGN_CENTER);
+
+    int exit_w = canvas_mm_to_px(c, 18.0f);
+    ui->hit_header_right = (AloudRect){c->width - margin - exit_w, 0, exit_w, header_h};
+    int close_sz = canvas_mm_to_px(c, 3.4f);
+    int exit_lbl_w = text_measure_width(ui->text, FONT_SANS_BOLD, nav_px, "Exit", 0);
+    int exit_total_w = close_sz + canvas_mm_to_px(c, 1.6f) + exit_lbl_w;
+    int exit_x = c->width - margin - exit_total_w;
+    icon_draw(c, ICON_CLOSE, exit_x, (header_h - close_sz) / 2, close_sz, TONE_BLACK);
+    text_draw_line(ui->text, c, FONT_SANS_BOLD, nav_px,
+                   exit_x + close_sz + canvas_mm_to_px(c, 1.6f),
+                   (header_h - nav_lh) / 2, exit_lbl_w + 8,
+                   "Exit", TONE_BLACK, TEXT_ALIGN_LEFT);
+
+    canvas_hline(c, margin, header_h - rule_px, c->width - margin * 2, rule_px, TONE_BLACK);
+
+    /* Current folder banner with "Use This Folder" button. */
+    int by = header_h;
+    int use_w = canvas_mm_to_px(c, 34.0f);
+    int use_h = canvas_mm_to_px(c, 9.0f);
+    int use_x = c->width - margin - use_w;
+    int use_y = by + (banner_h - use_h) / 2;
+    ui->hit_use_current_dir = (AloudRect){use_x, by, use_w, banner_h};
+    canvas_fill_round_rect(c, use_x, use_y, use_w, use_h,
+                           canvas_mm_to_px(c, 1.5f), TONE_BLACK);
+    int btn_px = canvas_mm_to_px(c, 2.9f);
+    int btn_lh = text_line_height(ui->text, FONT_SANS_BOLD, btn_px);
+    text_draw_line(ui->text, c, FONT_SANS_BOLD, btn_px,
+                   use_x, use_y + (use_h - btn_lh) / 2, use_w,
+                   "Use Current", TONE_WHITE, TEXT_ALIGN_CENTER);
+
+    int path_w = use_x - margin - canvas_mm_to_px(c, 3.0f);
+    int lbl_px = canvas_mm_to_px(c, 2.6f);
+    int path_px = canvas_mm_to_px(c, 3.2f);
+    text_draw_line(ui->text, c, FONT_SANS_REGULAR, lbl_px,
+                   margin, by + canvas_mm_to_px(c, 1.8f), path_w,
+                   "Tap 'Use Folder' on any directory where your audiobooks are downloaded:",
+                   TONE_INK_GRAY, TEXT_ALIGN_LEFT);
+    text_draw_line(ui->text, c, FONT_SANS_BOLD, path_px,
+                   margin, by + canvas_mm_to_px(c, 6.8f), path_w,
+                   ui->browse_dir, TONE_BLACK, TEXT_ALIGN_LEFT);
+
+    canvas_hline(c, margin, header_h + banner_h - 1, c->width - margin * 2, 1, TONE_BLACK);
+
+    int body_y = header_h + banner_h;
+    int body_h = c->height - body_y - footer_h;
+    ui->region_list_body = (AloudRect){0, body_y, c->width, c->height - body_y};
+
+    int target_row_h = canvas_mm_to_px(c, 15.0f);
+    int rows_per_page = body_h / target_row_h;
+    if (rows_per_page < 4) rows_per_page = 4;
+    if (rows_per_page > 12) rows_per_page = 12;
+    ui->folder_rows_per_page = rows_per_page;
+
+    int total_pages = (ui->folder_count + rows_per_page - 1) / rows_per_page;
+    if (total_pages < 1) total_pages = 1;
+    if (ui->folder_page < 0) ui->folder_page = 0;
+    if (ui->folder_page >= total_pages) ui->folder_page = total_pages - 1;
+
+    int row_h = body_h / rows_per_page;
+    int name_px = canvas_mm_to_px(c, 3.5f);
+    int meta_px = canvas_mm_to_px(c, 2.7f);
+    int name_lh = text_line_height(ui->text, FONT_SANS_BOLD, name_px);
+    int meta_lh = text_line_height(ui->text, FONT_SANS_REGULAR, meta_px);
+    int sel_w = canvas_mm_to_px(c, 28.0f);
+    int sel_h = canvas_mm_to_px(c, 8.6f);
+
+    int start_idx = ui->folder_page * rows_per_page;
+    ui->hit_list_row_count = 0;
+
+    for (int r = 0; r < rows_per_page; r++) {
+        int fidx = start_idx + r;
+        if (fidx >= ui->folder_count) break;
+        const UiFolderEntry *fe = &ui->folders[fidx];
+
+        int ry = body_y + r * row_h;
+        ui->hit_list_rows[ui->hit_list_row_count] = (AloudRect){0, ry, c->width, row_h};
+
+        bool is_active_lib = (strcmp(fe->fullpath, ui->library_dir) == 0);
+        int tx = margin;
+        int tw = c->width - margin * 2 - (fe->is_parent ? 0 : (sel_w + canvas_mm_to_px(c, 3.0f)));
+        int ty = ry + (row_h - (name_lh + meta_lh + canvas_mm_to_px(c, 0.8f))) / 2;
+
+        text_draw_line(ui->text, c, FONT_SANS_BOLD, name_px,
+                       tx, ty, tw, fe->name, TONE_BLACK, TEXT_ALIGN_LEFT);
+
+        char sub_info[256];
+        if (fe->is_parent) {
+            snprintf(sub_info, sizeof(sub_info), "Go up to parent directory (%s)", fe->fullpath);
+        } else if (fe->audio_count > 0 && fe->subdir_count > 0) {
+            snprintf(sub_info, sizeof(sub_info), "%d audio file%s \xC2\xB7 %d subfolder%s (%s)",
+                     fe->audio_count, fe->audio_count == 1 ? "" : "s",
+                     fe->subdir_count, fe->subdir_count == 1 ? "" : "s", fe->fullpath);
+        } else if (fe->audio_count > 0) {
+            snprintf(sub_info, sizeof(sub_info), "%d audio file%s (%s)",
+                     fe->audio_count, fe->audio_count == 1 ? "" : "s", fe->fullpath);
+        } else if (fe->subdir_count > 0) {
+            snprintf(sub_info, sizeof(sub_info), "%d subfolder%s \xC2\xB7 tap row to open (%s)",
+                     fe->subdir_count, fe->subdir_count == 1 ? "" : "s", fe->fullpath);
+        } else {
+            snprintf(sub_info, sizeof(sub_info), "%s", fe->fullpath);
+        }
+        text_draw_line(ui->text, c, FONT_SANS_REGULAR, meta_px,
+                       tx, ty + name_lh + canvas_mm_to_px(c, 0.8f), tw,
+                       sub_info, TONE_INK_GRAY, TEXT_ALIGN_LEFT);
+
+        if (!fe->is_parent) {
+            int sx = c->width - margin - sel_w;
+            int sy = ry + (row_h - sel_h) / 2;
+            ui->hit_folder_select[ui->hit_list_row_count] = (AloudRect){sx, ry, sel_w, row_h};
+            if (is_active_lib || fe->audio_count > 0) {
+                canvas_fill_round_rect(c, sx, sy, sel_w, sel_h,
+                                       canvas_mm_to_px(c, 1.4f), TONE_BLACK);
+                text_draw_line(ui->text, c, FONT_SANS_BOLD, btn_px,
+                               sx, sy + (sel_h - btn_lh) / 2, sel_w,
+                               is_active_lib ? "Selected" : "Use Folder",
+                               TONE_WHITE, TEXT_ALIGN_CENTER);
+            } else {
+                canvas_stroke_round_rect(c, sx, sy, sel_w, sel_h,
+                                         canvas_mm_to_px(c, 1.4f), rule_px, TONE_BLACK);
+                text_draw_line(ui->text, c, FONT_SANS_BOLD, btn_px,
+                               sx, sy + (sel_h - btn_lh) / 2, sel_w,
+                               "Use Folder", TONE_BLACK, TEXT_ALIGN_CENTER);
+            }
+        }
+
+        ui->hit_list_row_count++;
+        if (r + 1 < rows_per_page) {
+            canvas_hline(c, margin, ry + row_h - 1, c->width - margin * 2, 1, TONE_RULE_GRAY);
+        }
+    }
+
+    render_pagination_footer(ui, c->height - footer_h, footer_h, ui->folder_page, total_pages);
+}
+
 void ui_render_full(Ui *ui, bool force_flashing, AloudRect *out_rect, AloudWaveform *out_wfm) {
     if (!ui || !ui->canvas) return;
     clear_hit_boxes(ui);
@@ -975,6 +1394,9 @@ void ui_render_full(Ui *ui, bool force_flashing, AloudRect *out_rect, AloudWavef
             break;
         case UI_SCREEN_CHAPTERS:
             render_chapters_screen(ui);
+            break;
+        case UI_SCREEN_FOLDERS:
+            render_folders_screen(ui);
             break;
     }
 
@@ -1011,6 +1433,18 @@ static bool change_page(Ui *ui, int delta, AloudRect *out_rect, AloudWaveform *o
         ui->chap_page = next;
         clear_hit_boxes(ui);
         render_chapters_screen(ui);
+        if (out_rect) *out_rect = ui->region_list_body;
+        if (out_wfm) *out_wfm = ALOUD_WFM_GL16;
+        return true;
+    }
+    if (ui->screen == UI_SCREEN_FOLDERS) {
+        if (ui->folder_count == 0 || ui->folder_rows_per_page <= 0) return false;
+        int total = (ui->folder_count + ui->folder_rows_per_page - 1) / ui->folder_rows_per_page;
+        int next = ui->folder_page + delta;
+        if (next < 0 || next >= total) return false;
+        ui->folder_page = next;
+        clear_hit_boxes(ui);
+        render_folders_screen(ui);
         if (out_rect) *out_rect = ui->region_list_body;
         if (out_wfm) *out_wfm = ALOUD_WFM_GL16;
         return true;
@@ -1111,11 +1545,71 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
         return false;
     }
 
+    /* 1b. Folder picker screen taps. */
+    if (ui->screen == UI_SCREEN_FOLDERS) {
+        if (canvas_rect_contains(ui->hit_header_right, tx, ty)) {
+            ui->quit_requested = true;
+            return false;
+        }
+        if (canvas_rect_contains(ui->hit_header_left, tx, ty)) {
+            ui->screen = UI_SCREEN_LIBRARY;
+            ui_render_full(ui, false, out_rect, out_wfm);
+            return true;
+        }
+        if (canvas_rect_contains(ui->hit_use_current_dir, tx, ty)) {
+            char chosen[1024];
+            snprintf(chosen, sizeof(chosen), "%s", ui->browse_dir);
+            select_library_folder(ui, chosen);
+            ui_render_full(ui, true, out_rect, out_wfm);
+            return true;
+        }
+        if (canvas_rect_contains(ui->hit_page_prev, tx, ty)) {
+            return change_page(ui, -1, out_rect, out_wfm);
+        }
+        if (canvas_rect_contains(ui->hit_page_next, tx, ty)) {
+            return change_page(ui, +1, out_rect, out_wfm);
+        }
+        for (int i = 0; i < ui->hit_list_row_count; i++) {
+            int fidx = ui->folder_page * ui->folder_rows_per_page + i;
+            if (fidx >= ui->folder_count) break;
+            char target_path[1024];
+            snprintf(target_path, sizeof(target_path), "%s", ui->folders[fidx].fullpath);
+            bool is_parent = ui->folders[fidx].is_parent;
+            int subdirs = ui->folders[fidx].subdir_count;
+
+            /* Tapping the "Use Folder" button on the right selects this folder immediately. */
+            if (!is_parent && canvas_rect_contains(ui->hit_folder_select[i], tx, ty)) {
+                select_library_folder(ui, target_path);
+                ui_render_full(ui, true, out_rect, out_wfm);
+                return true;
+            }
+            /* Tapping the row navigates into it if it has subfolders (or is '..'),
+             * or selects it directly if it's a leaf folder! */
+            if (canvas_rect_contains(ui->hit_list_rows[i], tx, ty)) {
+                if (is_parent || subdirs > 0) {
+                    scan_browse_dir(ui, target_path);
+                    ui_render_full(ui, false, out_rect, out_wfm);
+                } else {
+                    select_library_folder(ui, target_path);
+                    ui_render_full(ui, true, out_rect, out_wfm);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     /* 2. Library screen taps. */
     if (ui->screen == UI_SCREEN_LIBRARY) {
         if (canvas_rect_contains(ui->hit_header_right, tx, ty)) {
             ui->quit_requested = true;
             return false;
+        }
+        if (canvas_rect_contains(ui->hit_header_center, tx, ty) ||
+            (ui->library->count == 0 && canvas_rect_contains(ui->hit_use_current_dir, tx, ty))) {
+            ui_open_folder_picker(ui, NULL);
+            ui_render_full(ui, false, out_rect, out_wfm);
+            return true;
         }
         if (canvas_rect_contains(ui->hit_page_prev, tx, ty)) {
             return change_page(ui, -1, out_rect, out_wfm);
@@ -1188,6 +1682,7 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
             player_toggle_play(ui->player);
             PlayerSnapshot snap;
             player_get_snapshot(ui->player, &snap);
+            ui->last_drawn_playing = snap.playing;
             if (snap.toast[0] != '\0' || had_toast) {
                 clear_hit_boxes(ui);
                 render_player_screen(ui);
@@ -1293,13 +1788,22 @@ bool ui_on_player_tick(Ui *ui, AloudRect *out_rect, AloudWaveform *out_wfm) {
     PlayerSnapshot snap;
     player_get_snapshot(ui->player, &snap);
 
+    /* If the background audio thread changed playing state (e.g. failed to open sink,
+     * sleep timer expired, or finished book) or posted a toast, repaint the Player screen! */
+    if (snap.playing != ui->last_drawn_playing || snap.toast[0] != '\0') {
+        clear_hit_boxes(ui);
+        render_player_screen(ui);
+        if (out_rect) *out_rect = (AloudRect){0, 0, ui->canvas->width, ui->canvas->height};
+        if (out_wfm) *out_wfm = ALOUD_WFM_GL16;
+        return true;
+    }
+
     int cur_min = (int)(snap.book_pos_ms / 60000);
     int cur_sleep_min = (snap.sleep_rem_ms > 0) ? (int)((snap.sleep_rem_ms + 59999) / 60000) : 0;
 
     /* Skip refresh completely when nothing visible changed (DESIGN.md). */
     if (cur_min == ui->last_drawn_minute &&
-        cur_sleep_min == ui->last_drawn_sleep_min &&
-        snap.toast[0] == '\0') {
+        cur_sleep_min == ui->last_drawn_sleep_min) {
         return false;
     }
 
