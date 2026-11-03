@@ -50,6 +50,8 @@ struct Player {
     int64_t paused_idle_ms;
     int64_t since_last_save_ms;
     int last_notified_second;
+    bool dirty_save;
+    bool just_seeked;
 
     char toast[256];
 
@@ -70,21 +72,41 @@ static void notify_main_locked(Player *p) {
     }
 }
 
-static void save_position_locked(Player *p) {
+static void update_in_memory_position_locked(Player *p) {
     if (!p->book || !p->store) return;
     int64_t epoch = now_epoch_sec();
     store_set(p->store, p->book->key, p->file_index, p->file_pos_ms,
               p->speed_x100, epoch, p->finished);
-    if (p->state_dir[0]) {
-        (void)store_save(p->store, p->state_dir);
-    }
     p->book->saved_file_index = p->file_index;
     p->book->saved_file_pos_ms = p->file_pos_ms;
     p->book->saved_book_pos_ms = p->book_pos_ms;
     p->book->saved_speed_x100 = p->speed_x100;
     p->book->updated_epoch = epoch;
     p->book->finished = p->finished;
+}
+
+static void save_position_locked(Player *p) {
+    if (!p->book || !p->store) return;
+    update_in_memory_position_locked(p);
+    if (p->state_dir[0]) {
+        (void)store_save(p->store, p->state_dir);
+    }
+    p->dirty_save = false;
     p->since_last_save_ms = 0;
+}
+
+static void mark_position_dirty_locked(Player *p) {
+    if (!p->book || !p->store) return;
+    update_in_memory_position_locked(p);
+    if (p->playing && p->thread_running) {
+        /* While playing, coalesce bursts of scrubber/skip taps: the audio thread
+         * persists within 2 s, so the UI thread never blocks on a FAT32 fsync per tap. */
+        p->dirty_save = true;
+        p->since_last_save_ms = 0;
+    } else {
+        /* Paused (or no audio thread): nothing else will flush soon, so persist now. */
+        save_position_locked(p);
+    }
 }
 
 static void update_book_pos_and_chapter_locked(Player *p) {
@@ -316,11 +338,13 @@ static int step_frames_locked(Player *p, int max_out_frames) {
     int64_t wall_ms = ((int64_t)got * 1000) / DECODER_OUT_RATE;
     if (wall_ms < 1) wall_ms = 1;
 
+    p->just_seeked = false;
     update_book_pos_and_chapter_locked(p);
 
-    /* Advance autosave counter (every 60 s while playing per D8). */
+    /* Advance autosave counter (every 60 s while playing, or after 2 s if a seek dirtied the position). */
     p->since_last_save_ms += wall_ms;
-    if (p->since_last_save_ms >= PLAYER_AUTOSAVE_INTERVAL_MS) {
+    if (p->since_last_save_ms >= PLAYER_AUTOSAVE_INTERVAL_MS ||
+        (p->dirty_save && p->since_last_save_ms >= 2000)) {
         save_position_locked(p);
     }
 
@@ -406,7 +430,7 @@ void player_destroy(Player *p) {
     if (!p) return;
     player_stop_thread(p);
     pthread_mutex_lock(&p->mu);
-    if (p->playing) {
+    if (p->playing || p->dirty_save) {
         p->playing = false;
         save_position_locked(p);
     }
@@ -499,6 +523,7 @@ int player_load_book(Player *p, Book *book) {
 
     p->playing = false;
     p->paused_once = false;
+    p->just_seeked = false;
     p->book = book;
     p->file_index = book->saved_file_index;
     p->file_pos_ms = book->saved_file_pos_ms;
@@ -557,7 +582,8 @@ static int seek_book_locked(Player *p, int64_t target_book_ms) {
     if (target_book_ms < p->book->total_duration_ms) {
         p->finished = false;
     }
-    save_position_locked(p);
+    p->just_seeked = true;
+    mark_position_dirty_locked(p);
     return rc;
 }
 
@@ -741,6 +767,9 @@ int player_set_sleep_timer(Player *p, int sleep_mode) {
 void player_housekeeping_tick(Player *p, int64_t elapsed_wall_ms) {
     if (!p || elapsed_wall_ms <= 0) return;
     pthread_mutex_lock(&p->mu);
+    if (p->dirty_save && !p->playing) {
+        save_position_locked(p);
+    }
     if (!p->playing && !p->ao_busy && p->ao && !p->using_sim_ao) {
         p->paused_idle_ms += elapsed_wall_ms;
         /* After 2 min paused, stop the helper entirely so the mixer/BT path can idle (D6). */
@@ -770,7 +799,7 @@ void player_get_snapshot(Player *p, PlayerSnapshot *snap) {
     snap->file_index = p->file_index;
     snap->file_pos_ms = p->file_pos_ms;
     snap->book_pos_ms = p->book_pos_ms;
-    if (p->playing && p->ao && p->ao->delay_ms) {
+    if (p->playing && !p->just_seeked && p->ao && p->ao->delay_ms) {
         int64_t delay_wall = p->ao->delay_ms(p->ao);
         int64_t delay_book = (delay_wall * p->speed_x100) / 100;
         if (snap->book_pos_ms > delay_book) {

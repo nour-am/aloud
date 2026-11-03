@@ -673,8 +673,8 @@ static void render_player_progress_block(Ui *ui, const PlayerSnapshot *snap,
                    x, cur_y, w, ch_of, TONE_INK_GRAY, TEXT_ALIGN_CENTER | TEXT_FLAG_TABULAR);
     cur_y += text_line_height(ui->text, FONT_SANS_REGULAR, ch_sub_px) + canvas_mm_to_px(c, 2.2f);
 
-    /* Chapter scrubber: 9 mm tall touch target centered on a crisp track + black fill + dot. */
-    int scrub_touch_h = canvas_mm_to_px(c, 9.0f);
+    /* Chapter scrubber: 13 mm tall touch target centered on a crisp track + black fill + dot. */
+    int scrub_touch_h = canvas_mm_to_px(c, 13.0f);
     int track_y = cur_y + canvas_mm_to_px(c, 2.0f);
     int track_h = canvas_mm_to_px(c, 0.8f);
     if (track_h < 2) track_h = 2;
@@ -1470,13 +1470,38 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
         player_clear_toast(ui->player);
     }
 
-    if (ev.type == ALOUD_EV_SWIPE_LEFT || ev.type == ALOUD_EV_KEY_NEXT) {
+    if (ev.type == ALOUD_EV_SWIPE_LEFT || ev.type == ALOUD_EV_KEY_NEXT ||
+        ev.type == ALOUD_EV_SWIPE_RIGHT || ev.type == ALOUD_EV_KEY_PREV) {
         if (ui->screen == UI_SCREEN_PLAYER && ui->sheet == UI_SHEET_NONE) {
-            if (ev.type == ALOUD_EV_KEY_NEXT) {
-                /* Hardware page-turn forward = skip forward 30 s in the player (D11). */
-                player_seek_relative_ms(ui->player, 30000);
+            /* If the user dragged/swiped across the scrubber bar, seek to the release X! */
+            if ((ev.type == ALOUD_EV_SWIPE_LEFT || ev.type == ALOUD_EV_SWIPE_RIGHT) &&
+                (canvas_rect_contains(ui->hit_scrubber, ev.start_x, ev.start_y) ||
+                 canvas_rect_contains(ui->hit_scrubber, ev.x, ev.y))) {
                 PlayerSnapshot snap;
                 player_get_snapshot(ui->player, &snap);
+                if (snap.book && snap.book->chapter_count > 0 && ui->hit_scrubber.w > 0) {
+                    int rel_x = ev.x - ui->hit_scrubber.x;
+                    if (rel_x < 0) rel_x = 0;
+                    if (rel_x > ui->hit_scrubber.w) rel_x = ui->hit_scrubber.w;
+                    const BookChapter *ch = &snap.book->chapters[snap.chapter_index];
+                    int64_t new_ch_pos = ((int64_t)rel_x * ch->duration_ms) / ui->hit_scrubber.w;
+                    player_seek_book_ms(ui->player, ch->start_book_ms + new_ch_pos);
+                    player_get_snapshot(ui->player, &snap);
+                    ui->last_drawn_second = (int)(snap.book_pos_ms / 1000);
+                    render_player_progress_block(ui, &snap,
+                                                 ui->region_progress.x, ui->region_progress.y,
+                                                 ui->region_progress.w);
+                    if (out_rect) *out_rect = ui->region_progress;
+                    if (out_wfm) *out_wfm = ALOUD_WFM_DU;
+                    return true;
+                }
+            }
+            if (ev.type == ALOUD_EV_KEY_NEXT || ev.type == ALOUD_EV_KEY_PREV) {
+                /* Hardware page-turn forward/back = skip +/- 30 s in the player (D11). */
+                player_seek_relative_ms(ui->player, (ev.type == ALOUD_EV_KEY_NEXT) ? 30000 : -30000);
+                PlayerSnapshot snap;
+                player_get_snapshot(ui->player, &snap);
+                ui->last_drawn_second = (int)(snap.book_pos_ms / 1000);
                 render_player_progress_block(ui, &snap,
                                              ui->region_progress.x, ui->region_progress.y,
                                              ui->region_progress.w);
@@ -1486,26 +1511,8 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
             }
             return false;
         }
-        return change_page(ui, +1, out_rect, out_wfm);
-    }
-
-    if (ev.type == ALOUD_EV_SWIPE_RIGHT || ev.type == ALOUD_EV_KEY_PREV) {
-        if (ui->screen == UI_SCREEN_PLAYER && ui->sheet == UI_SHEET_NONE) {
-            if (ev.type == ALOUD_EV_KEY_PREV) {
-                /* Hardware page-turn back = skip back 30 s in the player (D11). */
-                player_seek_relative_ms(ui->player, -30000);
-                PlayerSnapshot snap;
-                player_get_snapshot(ui->player, &snap);
-                render_player_progress_block(ui, &snap,
-                                             ui->region_progress.x, ui->region_progress.y,
-                                             ui->region_progress.w);
-                if (out_rect) *out_rect = ui->region_progress;
-                if (out_wfm) *out_wfm = ALOUD_WFM_DU;
-                return true;
-            }
-            return false;
-        }
-        return change_page(ui, -1, out_rect, out_wfm);
+        int delta = (ev.type == ALOUD_EV_SWIPE_LEFT || ev.type == ALOUD_EV_KEY_NEXT) ? +1 : -1;
+        return change_page(ui, delta, out_rect, out_wfm);
     }
 
     if (ev.type != ALOUD_EV_TAP) {
@@ -1711,6 +1718,7 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
                 int64_t new_ch_pos = ((int64_t)rel_x * ch->duration_ms) / ui->hit_scrubber.w;
                 player_seek_book_ms(ui->player, ch->start_book_ms + new_ch_pos);
                 player_get_snapshot(ui->player, &snap);
+                ui->last_drawn_second = (int)(snap.book_pos_ms / 1000);
                 render_player_progress_block(ui, &snap,
                                              ui->region_progress.x, ui->region_progress.y,
                                              ui->region_progress.w);
@@ -1735,6 +1743,7 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
             }
             PlayerSnapshot snap;
             player_get_snapshot(ui->player, &snap);
+            ui->last_drawn_second = (int)(snap.book_pos_ms / 1000);
             render_player_progress_block(ui, &snap,
                                          ui->region_progress.x, ui->region_progress.y,
                                          ui->region_progress.w);

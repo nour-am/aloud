@@ -365,6 +365,21 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
           "PW5 progress block (%d..%d) does not overlap transport button (y=%d)",
           ui.region_progress.y, ui.region_progress.y + ui.region_progress.h, ui.hit_play_pause.y);
 
+    /* Drag/swipe across the scrubber bar -> seeks immediately to release X and updates with DU. */
+    AloudInputEvent drag_scrub = {
+        .type = ALOUD_EV_SWIPE_RIGHT,
+        .start_x = ui.hit_scrubber.x + 20,
+        .start_y = ui.hit_scrubber.y + ui.hit_scrubber.h / 2,
+        .x = ui.hit_scrubber.x + (ui.hit_scrubber.w * 3) / 4,
+        .y = ui.hit_scrubber.y + ui.hit_scrubber.h / 2
+    };
+    CHECK(ui_handle_event(&ui, drag_scrub, &rect, &wfm) && wfm == ALOUD_WFM_DU,
+          "scrubber drag seeks immediately and refreshes progress with DU");
+    player_get_snapshot(player, &snap);
+    CHECK(snap.chapter_pos_ms > (snap.chapter_dur_ms * 60) / 100,
+          "scrubber drag jumped to ~75%% of chapter (%lld / %lld ms)",
+          (long long)snap.chapter_pos_ms, (long long)snap.chapter_dur_ms);
+
     /* Tap Chapters button -> navigates to Chapters screen. */
     AloudInputEvent tap_chaps = {
         .type = ALOUD_EV_TAP,

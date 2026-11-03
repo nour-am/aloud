@@ -333,7 +333,12 @@ static int push_decoded_frame(Decoder *d, const AVFrame *frame) {
     if (d->discard_until_ms >= 0) {
         int64_t cur_ms = decoder_position_ms(d);
         int64_t diff_ms = d->discard_until_ms - cur_ms;
-        if (diff_ms > 0) {
+        if (diff_ms > 3000) {
+            /* Container seek landed far before target (sparse index): start from where it
+             * landed rather than burning seconds of Cortex-A8 CPU on discarded audio. Short
+             * gaps (MP3/AAC frame granularity) are still trimmed for a sample-exact seek. */
+            d->discard_until_ms = -1;
+        } else if (diff_ms > 0) {
             int64_t skip_frames = (diff_ms * DECODER_OUT_RATE) / 1000;
             if (skip_frames >= converted) {
                 d->frames_since_pts += converted;
@@ -456,8 +461,11 @@ int decoder_seek_ms(Decoder *d, int64_t target_ms) {
 
     avcodec_flush_buffers(d->codec);
     if (d->swr) {
-        /* Reset resampler state after a seek. */
-        (void)init_resampler(d);
+        /* Drain resampler delay in-place instead of reallocating SwrContext on every seek. */
+        uint8_t *out_ptr[1] = {(uint8_t *)d->fifo_buf};
+        while (swr_get_out_samples(d->swr, 0) > 0) {
+            if (swr_convert(d->swr, out_ptr, d->fifo_cap_frames, NULL, 0) <= 0) break;
+        }
     }
     d->fifo_len_frames = 0;
     d->fifo_read_frames = 0;

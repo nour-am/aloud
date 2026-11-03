@@ -28,6 +28,8 @@ typedef struct {
     AloudEventType type;
     int x;
     int y;
+    int start_x;
+    int start_y;
 } AloudInputEvent;
 
 /* Portable evdev constants for touch/key state machine (matches <linux/input.h>

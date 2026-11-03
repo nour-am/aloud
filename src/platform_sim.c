@@ -210,12 +210,14 @@ bool touch_decoder_feed(TouchDecoder *td, uint16_t type, uint16_t code, int32_t 
                     int dy = td->last_screen_y - td->start_screen_y;
                     int swipe_px = (12 * td->dpi) / 25; /* ~12 mm */
                     if (swipe_px < 40) swipe_px = 40;
+                    out_ev->x = td->last_screen_x;
+                    out_ev->y = td->last_screen_y;
+                    out_ev->start_x = td->start_screen_x;
+                    out_ev->start_y = td->start_screen_y;
                     if (abs(dx) >= swipe_px && abs(dx) > (abs(dy) * 3) / 2) {
                         out_ev->type = (dx < 0) ? ALOUD_EV_SWIPE_LEFT : ALOUD_EV_SWIPE_RIGHT;
                     } else {
                         out_ev->type = ALOUD_EV_TAP;
-                        out_ev->x = td->last_screen_x;
-                        out_ev->y = td->last_screen_y;
                     }
                     return true;
                 }
