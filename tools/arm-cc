@@ -1,0 +1,13 @@
+#!/bin/sh
+# Static ARMv7 (hard-float, NEON) cross compiler. A fully static musl binary
+# runs on every Kindle firmware regardless of its own glibc or float ABI.
+# Build systems pass GCC-style -mcpu/-march/-mfpu values that zig parses
+# differently, so the target CPU is pinned here and theirs are dropped.
+for a in "$@"; do
+  shift
+  case "$a" in
+    -mcpu=*|-march=*|-mtune=*|-mfpu=*|-mfloat-abi=*) ;;
+    *) set -- "$@" "$a" ;;
+  esac
+done
+exec zig cc -target arm-linux-musleabihf -mcpu=cortex_a8 "$@"
