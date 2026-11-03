@@ -10,11 +10,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+/* The named FIFO is drained on pause/seek (drain_fifo_nonblocking), so its size no
+ * longer adds pause latency. Make it big enough (~185 ms) that a slow e-ink render on
+ * the single Cortex-A8 core cannot starve mixersink right after playback starts. The
+ * anonymous-pipe fallback cannot be drained, so it stays small for snappy pauses. */
+#define GST_FIFO_BYTES 32768
+#define GST_PIPE_BYTES 8192
+/* Estimated latency of the helper's `queue max-size-time=100ms` + mixersink. */
+#define GST_QUEUE_MS 100
 
 static void sleep_ms(int ms) {
     struct timespec ts;
@@ -267,9 +277,16 @@ static int gst_flush(AudioOut *ao) {
 }
 
 static int64_t gst_delay_ms(AudioOut *ao) {
-    (void)ao;
-    /* With an 8 KB FIFO buffer + 100 ms queue, pipe + mixersink latency is ~150 ms. */
-    return 150;
+    if (!ao || !ao->impl) return GST_QUEUE_MS;
+    GstAudioImpl *im = (GstAudioImpl *)ao->impl;
+    /* Bytes still sitting in the FIFO are exact and cost one ioctl (called once per
+     * second from the UI thread); add the helper queue estimate on top. */
+    int queued = 0;
+    if (im->fifo_path[0] && ioctl(im->pcm_fd, FIONREAD, &queued) == 0 && queued > 0) {
+        int bytes_per_sec = DECODER_OUT_RATE * DECODER_OUT_CHANNELS * (int)sizeof(int16_t);
+        return GST_QUEUE_MS + ((int64_t)queued * 1000) / bytes_per_sec;
+    }
+    return GST_QUEUE_MS + (im->fifo_path[0] ? 0 : 50);
 }
 
 static void gst_close(AudioOut *ao) {
@@ -330,7 +347,7 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
         if (pcm_fd >= 0) {
             use_fifo = true;
 #ifdef F_SETPIPE_SZ
-            (void)fcntl(pcm_fd, F_SETPIPE_SZ, 8192);
+            (void)fcntl(pcm_fd, F_SETPIPE_SZ, GST_FIFO_BYTES);
 #endif
         } else {
             unlink(fifo_path);
@@ -342,7 +359,7 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
         }
         pcm_fd = pcm_pipe[1];
 #ifdef F_SETPIPE_SZ
-        (void)fcntl(pcm_fd, F_SETPIPE_SZ, 8192);
+        (void)fcntl(pcm_fd, F_SETPIPE_SZ, GST_PIPE_BYTES);
 #endif
     }
 
@@ -477,6 +494,14 @@ int audio_out_open_gst(AudioOut **out, const char *helper_dir, char *err_msg, si
     ao->flush = gst_flush;
     ao->delay_ms = gst_delay_ms;
     ao->close = gst_close;
+
+    /* Pre-roll ~120 ms of silence: mixersink/A2DP start-up (stream setup, clock slaving,
+     * first underrun) then lands on silence instead of clipping the first syllable. */
+    static const int16_t zeros[1024 * DECODER_OUT_CHANNELS];
+    for (int left = (DECODER_OUT_RATE * 120) / 1000; left > 0; left -= 1024) {
+        if (gst_write_s16le(ao, zeros, left < 1024 ? left : 1024) < 0) break;
+    }
+
     *out = ao;
     return 0;
 }

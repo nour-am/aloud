@@ -4,7 +4,19 @@
 set -eu
 
 OUT=${1:?usage: gen_fixtures.sh <output-dir>}
+# Tests mutate state/ (positions, library cache, thumbnails): reset it on every run
+# so each `make test` starts from the same state and results never depend on how
+# many times the suite ran before. Media fixtures below are generated only once.
+rm -rf "$OUT/state"
 mkdir -p "$OUT/library" "$OUT/state" "$OUT/tmp"
+
+# Pre-populate a realistic listening position in state/positions.tsv for screenshots.
+cat > "$OUT/state/positions.tsv" << 'EOF'
+# aloud-positions-v1
+Moby-Dick.m4b	0	4140	125	1793690000	0
+Octavia E. Butler - Kindred	1	1200	100	1793680000	0
+# end
+EOF
 
 # Stamp file so repeated `make test` runs reuse generated fixtures instantaneously.
 if [ -f "$OUT/.fixtures_v1" ]; then
@@ -93,12 +105,5 @@ cp "$BOOK_DIR/01 Prologue.mp3" "$OUT/tmp/corrupt_truncated.mp3"
 dd if="$BOOK_DIR/01 Prologue.mp3" of="$OUT/tmp/corrupt_truncated.mp3" bs=1024 count=6 2>/dev/null
 printf '\xff\xff\x00\xba\xad\xf0\x0d' >> "$OUT/tmp/corrupt_truncated.mp3"
 
-# 6. Pre-populate a realistic listening position in state/positions.tsv for screenshots.
-cat > "$OUT/state/positions.tsv" << 'EOF'
-# aloud-positions-v1
-Moby-Dick.m4b	0	4140	125	1793690000	0
-Octavia E. Butler - Kindred	1	1200	100	1793680000	0
-# end
-EOF
 
 touch "$OUT/.fixtures_v1"

@@ -127,6 +127,21 @@ static void test_decoder_m4b_and_corrupt(const char *fixture_dir) {
     }
 }
 
+/* Capturing AudioOut: records the first chunk written after a reset so tests can
+ * inspect the start-of-playback ramp. */
+static int16_t g_cap_buf[2048 * 2];
+static int g_cap_frames;
+static int cap_write(AudioOut *ao, const int16_t *frames, int n) {
+    (void)ao;
+    if (g_cap_frames == 0 && n > 0) {
+        int keep = n < 2048 ? n : 2048;
+        memcpy(g_cap_buf, frames, (size_t)keep * 2 * sizeof(int16_t));
+        g_cap_frames = keep;
+    }
+    return n;
+}
+static void cap_close(AudioOut *ao) { free(ao); }
+
 static void test_library_and_player_engine(const char *fixture_dir) {
     char lib_dir[1024], state_dir[1024];
     snprintf(lib_dir, sizeof(lib_dir), "%s/library", fixture_dir);
@@ -189,6 +204,35 @@ static void test_library_and_player_engine(const char *fixture_dir) {
     CHECK(player_play(p) == 0, "resume rewinds 2000 ms");
     player_get_snapshot(p, &snap);
     CHECK(snap.book_pos_ms >= 2800 && snap.book_pos_ms <= 3200, "rewound ~2s on resume");
+
+    /* Playback start must ramp in from silence (no click / glitch at playback start). */
+    {
+        AudioOut *cap = calloc(1, sizeof(*cap));
+        cap->write_s16le = cap_write;
+        cap->close = cap_close;
+        Player *p2 = NULL;
+        CHECK(player_create(&p2, &store, state_dir, NULL) == 0, "player_create (ramp test)");
+        player_set_sim_audio(p2, cap);
+        CHECK(player_load_book(p2, &lib.books[0]) == 0 && player_seek_book_ms(p2, 3000) == 0 &&
+              player_play(p2) == 0, "ramp test: load, seek 3 s, play");
+        g_cap_frames = 0;
+        (void)player_step_frames_sync(p2, 2048);
+        int peak_late = 0;
+        for (int i = 1500 * 2; i < g_cap_frames * 2; i++) {
+            int v = abs(g_cap_buf[i]);
+            if (v > peak_late) peak_late = v;
+        }
+        CHECK(g_cap_frames >= 2048 && g_cap_buf[0] == 0 && g_cap_buf[1] == 0 && peak_late > 1000,
+              "playback starts at silence and ramps in (first=%d,%d peak_after_ramp=%d)",
+              g_cap_buf[0], g_cap_buf[1], peak_late);
+        int peak_early = 0;
+        for (int i = 0; i < 40 * 2; i++) {
+            int v = abs(g_cap_buf[i]);
+            if (v > peak_early) peak_early = v;
+        }
+        CHECK(peak_early * 10 < peak_late, "first ~1 ms is attenuated (%d vs %d)", peak_early, peak_late);
+        player_destroy(p2); /* closes cap */
+    }
 
     /* Test 2.0x speed + sleep timer fade-out to auto-pause. */
     CHECK(player_set_speed(p, 200) == 0, "set speed 2.0x");
@@ -311,14 +355,26 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     CHECK(wfm == ALOUD_WFM_GC16_FLASH, "initial library render uses GC16 flash");
     CHECK(ui.hit_list_row_count == 3, "3 book rows clickable");
 
-    /* Tap row 0 -> navigates to Player screen. */
+    /* Tap the Kindred row -> navigates to Player screen. Pick it by title: rows are
+     * ordered by last-played second, which earlier tests make timing-dependent (a
+     * nearly-finished 12 s book in row 0 made later checks flaky). */
+    int kindred_row = -1;
+    for (int i = 0; i < (int)lib.count; i++) {
+        if (strstr(lib.books[i].title, "Kindred")) kindred_row = i;
+    }
+    CHECK(kindred_row >= 0 && kindred_row < ui.hit_list_row_count, "Kindred row present");
     AloudInputEvent tap_row = {
         .type = ALOUD_EV_TAP,
-        .x = ui.hit_list_rows[0].x + 100,
-        .y = ui.hit_list_rows[0].y + 50
+        .x = ui.hit_list_rows[kindred_row].x + 100,
+        .y = ui.hit_list_rows[kindred_row].y + 50
     };
     CHECK(ui_handle_event(&ui, tap_row, &rect, &wfm), "tap row 0 handled");
     CHECK(ui.screen == UI_SCREEN_PLAYER, "navigated to Player screen");
+    {
+        PlayerSnapshot chosen;
+        player_get_snapshot(player, &chosen);
+        CHECK(chosen.book && strstr(chosen.book->title, "Kindred"), "opened Kindred");
+    }
 
     /* Tap Play button -> surgical DU refresh on play button + progress (NOT full screen!). */
     AloudInputEvent tap_play = {

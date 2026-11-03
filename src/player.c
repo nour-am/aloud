@@ -52,6 +52,7 @@ struct Player {
     int last_notified_second;
     bool dirty_save;
     bool just_seeked;
+    int fade_in_left; /* frames of start-of-audio ramp still to apply */
 
     char toast[256];
 
@@ -301,7 +302,24 @@ static int step_frames_locked(Player *p, int max_out_frames) {
     }
 
     int total_samples = got * DECODER_OUT_CHANNELS;
-    if (fabsf(gain - 1.0f) > 0.001f) {
+    if (p->fade_in_left > 0) {
+        /* Ramp in after start/resume/seek: starting mid-waveform at full amplitude
+         * is an audible click ("glitch") on headphones. */
+        for (int f = 0; f < got; f++) {
+            float g = gain;
+            if (p->fade_in_left > 0) {
+                g *= 1.0f - (float)p->fade_in_left / (float)PLAYER_FADE_IN_FRAMES;
+                p->fade_in_left--;
+            }
+            for (int c = 0; c < DECODER_OUT_CHANNELS; c++) {
+                int i = f * DECODER_OUT_CHANNELS + c;
+                int32_t v = (int32_t)lroundf((float)p->sonic_buf[i] * g);
+                if (v > 32767) v = 32767;
+                if (v < -32768) v = -32768;
+                p->write_buf[i] = (int16_t)v;
+            }
+        }
+    } else if (fabsf(gain - 1.0f) > 0.001f) {
         for (int i = 0; i < total_samples; i++) {
             int32_t v = (int32_t)lroundf((float)p->sonic_buf[i] * gain);
             if (v > 32767) v = 32767;
@@ -583,6 +601,7 @@ static int seek_book_locked(Player *p, int64_t target_book_ms) {
         p->finished = false;
     }
     p->just_seeked = true;
+    p->fade_in_left = PLAYER_FADE_IN_FRAMES;
     mark_position_dirty_locked(p);
     return rc;
 }
@@ -623,6 +642,7 @@ int player_play(Player *p) {
 
     p->playing = true;
     p->paused_idle_ms = 0;
+    p->fade_in_left = PLAYER_FADE_IN_FRAMES;
     pthread_cond_broadcast(&p->cv);
     pthread_mutex_unlock(&p->mu);
     return 0;
