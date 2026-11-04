@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "audio_out.h"
+#include "bench.h"
 #include "canvas.h"
 #include "decoder.h"
 #include "library.h"
@@ -483,6 +484,8 @@ int main(int argc, char **argv) {
     const char *export_screens_dir = NULL;
     const char *walkthrough_dir = NULL;
     bool tone_test = false;
+    const char *bench_file = NULL;
+    int bench_seconds = 120;
     int tone_seconds = 10;
     float top_inset_mm = 0.0f;
 
@@ -507,6 +510,11 @@ int main(int argc, char **argv) {
             export_screens_dir = argv[++i];
         } else if (strcmp(argv[i], "--walkthrough") == 0 && i + 1 < argc) {
             walkthrough_dir = argv[++i];
+        } else if (strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
+            bench_file = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                bench_seconds = atoi(argv[++i]);
+            }
         } else if (strcmp(argv[i], "--tone-test") == 0) {
             tone_test = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -529,6 +537,10 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+
+    if (bench_file) {
+        return bench_run(bench_file, bench_seconds, stdout) == 0 ? 0 : 1;
+    }
 
     if (tone_test) {
         return run_tone_test(helper_dir, tone_seconds);

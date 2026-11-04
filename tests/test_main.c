@@ -4,6 +4,7 @@
 #include "../src/decoder.h"
 #include "../src/icons.h"
 #include "../src/library.h"
+#include "../src/mp4lite.h"
 #include "../src/platform.h"
 #include "../src/player.h"
 #include "../src/power.h"
@@ -125,6 +126,65 @@ static void test_decoder_m4b_and_corrupt(const char *fixture_dir) {
         }
         CHECK(total > 0, "decoded valid prefix of truncated MP3 before clean EOF");
         decoder_close(cdec);
+    }
+}
+
+static int read_n(Decoder *d, int16_t *out, int frames) {
+    int total = 0, n;
+    while (total < frames && (n = decoder_read_frames(d, out + total * 2, frames - total)) > 0) {
+        total += n;
+    }
+    return total;
+}
+
+static void test_mp4lite_reader(const char *fixture_dir) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/library/Moby-Dick.m4b", fixture_dir);
+
+    Mp4Lite *m = NULL;
+    Mp4LiteInfo mi;
+    CHECK(mp4lite_open(&m, path, &mi) == 0 && m, "mp4lite opens an ffmpeg-made M4B");
+    CHECK(mi.timescale > 0 && mi.asc_len >= 2 && mi.sample_count > 400, "mp4lite track info");
+    CHECK(mp4lite_heap_bytes(m) < 64 * 1024, "mp4lite memory is independent of length");
+    int64_t pts = 0;
+    CHECK(mp4lite_seek(m, (int64_t)mi.timescale * 6, &pts) == 0, "mp4lite seek");
+    CHECK(pts <= (int64_t)mi.timescale * 6 && pts > (int64_t)mi.timescale * 6 - 2048,
+          "mp4lite seek lands on the frame holding the target");
+    mp4lite_close(m);
+
+    /* Same PCM as libavformat, sample for sample, when read from the start. */
+    Decoder *lite = NULL, *ref = NULL;
+    CHECK(decoder_open(&lite, path) == 0 && decoder_uses_mp4lite(lite), "M4B uses mp4lite");
+    CHECK(decoder_open_ex(&ref, path, DECODER_FLAG_NO_MP4LITE) == 0 && !decoder_uses_mp4lite(ref),
+          "libavformat path still available");
+    CHECK(decoder_duration_ms(lite) == decoder_duration_ms(ref), "same duration both paths");
+    static int16_t a[44100 * 2 * 2], b[44100 * 2 * 2];
+    int na = read_n(lite, a, 44100 * 2), nb = read_n(ref, b, 44100 * 2);
+    CHECK(na == nb && na == 44100 * 2, "same frame count both paths");
+    CHECK(memcmp(a, b, (size_t)na * 4) == 0, "bit-identical PCM both paths");
+    CHECK(decoder_seek_ms(lite, 6000) == 0 && decoder_seek_ms(ref, 6000) == 0, "seek both");
+    int64_t pl = decoder_position_ms(lite);
+    CHECK(pl >= 5950 && pl <= 6050, "mp4lite position after seek");
+    CHECK(read_n(lite, a, 4096) == 4096, "mp4lite decodes after seek");
+    CHECK(decoder_seek_ms(lite, 99999999) == 0 && read_n(lite, a, 4096) < 4096, "seek past end is EOF");
+    decoder_close(lite);
+    decoder_close(ref);
+
+    /* Fragmented MP4 is out of scope for mp4lite: must fall back, not fail. */
+    snprintf(path, sizeof(path), "%s/tmp/fragmented.m4a", fixture_dir);
+    Decoder *frag = NULL;
+    CHECK(decoder_open(&frag, path) == 0 && !decoder_uses_mp4lite(frag), "fragmented MP4 falls back");
+    CHECK(read_n(frag, a, 44100) == 44100, "fragmented MP4 still plays");
+    decoder_close(frag);
+
+    /* Truncated M4B (download cut short): plays what exists, then ends cleanly. */
+    snprintf(path, sizeof(path), "%s/tmp/truncated.m4b", fixture_dir);
+    Decoder *trunc = NULL;
+    if (decoder_open(&trunc, path) == 0 && trunc) {
+        int total = 0, n;
+        while ((n = decoder_read_frames(trunc, a, 4096)) > 0) total += n;
+        CHECK(total > 44100, "truncated M4B plays its first seconds");
+        decoder_close(trunc);
     }
 }
 
@@ -680,6 +740,7 @@ int main(int argc, char **argv) {
     test_natural_sort();
     test_store_persistence_and_recovery(fixture_dir);
     test_decoder_m4b_and_corrupt(fixture_dir);
+    test_mp4lite_reader(fixture_dir);
     test_library_and_player_engine(fixture_dir);
     test_power_and_touch_decoders();
     test_gst_backend_with_fake_helper(fixture_dir);

@@ -23,6 +23,7 @@ endif
 CORE_SRCS := \
 	src/store.c \
 	src/decoder.c \
+	src/mp4lite.c \
 	src/canvas.c \
 	src/library.c \
 	src/audio_out_sim.c \
@@ -33,6 +34,7 @@ CORE_SRCS := \
 	src/text.c \
 	src/icons.c \
 	src/ui.c \
+	src/bench.c \
 	src/platform_sim.c
 
 FBINK_SRCS := \

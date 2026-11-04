@@ -19,7 +19,7 @@ Octavia E. Butler - Kindred	1	1200	100	1793680000	0
 EOF
 
 # Stamp file so repeated `make test` runs reuse generated fixtures instantaneously.
-if [ -f "$OUT/.fixtures_v1" ]; then
+if [ -f "$OUT/.fixtures_v2" ]; then
   exit 0
 fi
 
@@ -105,5 +105,11 @@ cp "$BOOK_DIR/01 Prologue.mp3" "$OUT/tmp/corrupt_truncated.mp3"
 dd if="$BOOK_DIR/01 Prologue.mp3" of="$OUT/tmp/corrupt_truncated.mp3" bs=1024 count=6 2>/dev/null
 printf '\xff\xff\x00\xba\xad\xf0\x0d' >> "$OUT/tmp/corrupt_truncated.mp3"
 
+# 6. MP4 variants for the low-memory reader (src/mp4lite.c): a fragmented file it must
+#    hand to libavformat, and a truncated M4B it must play up to the cut.
+$FFMPEG -i "$OUT/library/Moby-Dick.m4b" -map 0:a -c copy \
+  -movflags frag_keyframe+empty_moov "$OUT/tmp/fragmented.m4a"
+SIZE=$(wc -c < "$OUT/library/Moby-Dick.m4b")
+dd if="$OUT/library/Moby-Dick.m4b" of="$OUT/tmp/truncated.m4b" bs=1 count=$((SIZE * 2 / 3)) 2>/dev/null
 
-touch "$OUT/.fixtures_v1"
+touch "$OUT/.fixtures_v2"

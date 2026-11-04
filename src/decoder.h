@@ -38,6 +38,12 @@ int decoder_probe(const char *path, DecoderProbeInfo *info,
 /* Open a media file for decoding to S16LE, 44100 Hz, stereo PCM. */
 int decoder_open(Decoder **out, const char *path);
 
+#define DECODER_FLAG_NO_MP4LITE 1u /* force libavformat (tests, ALOUD_NO_MP4LITE=1) */
+int decoder_open_ex(Decoder **out, const char *path, unsigned flags);
+
+/* True when the file is read by the low-memory MP4 reader rather than libavformat. */
+bool decoder_uses_mp4lite(const Decoder *d);
+
 /* Close and free all FFmpeg contexts. */
 void decoder_close(Decoder *d);
 

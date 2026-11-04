@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "decoder.h"
+#include "mp4lite.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -11,6 +12,7 @@
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
+#include <libavutil/intreadwrite.h>
 #include <libavutil/log.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
@@ -30,6 +32,15 @@ struct Decoder {
     int64_t discard_until_ms;
     bool eof_reached;
     bool decoder_flushed;
+
+    /* MP4/M4B audio via the low-memory reader instead of libavformat (mp4lite.h). */
+    Mp4Lite *mp4;
+
+    /* Input format the resampler was built for; rebuilt if frames change it (HE-AAC
+     * reports its doubled SBR rate only once the first frame is decoded). */
+    int swr_in_rate;
+    int swr_in_fmt;
+    int swr_in_channels;
 
     /* Leftover resampled S16LE stereo frames from previous decode call. */
     int16_t *fifo_buf;
@@ -157,20 +168,26 @@ int decoder_probe(const char *path, DecoderProbeInfo *info,
     return 0;
 }
 
-static int init_resampler(Decoder *d) {
+static int init_resampler_for(Decoder *d, const AVChannelLayout *layout, int fmt, int rate) {
     if (d->swr) {
         swr_free(&d->swr);
     }
     AVChannelLayout out_layout = AV_CHANNEL_LAYOUT_STEREO;
-    AVChannelLayout in_layout = d->codec->ch_layout;
-    if (in_layout.nb_channels <= 0) {
+    AVChannelLayout in_layout;
+    if (!layout || layout->nb_channels <= 0 ||
+        av_channel_layout_copy(&in_layout, layout) < 0) {
         av_channel_layout_default(&in_layout, 2);
     }
+    if (rate <= 0) rate = DECODER_OUT_RATE;
 
     int rc = swr_alloc_set_opts2(&d->swr,
                                  &out_layout, AV_SAMPLE_FMT_S16, DECODER_OUT_RATE,
-                                 &in_layout, d->codec->sample_fmt, d->codec->sample_rate,
+                                 &in_layout, (enum AVSampleFormat)fmt, rate,
                                  0, NULL);
+    d->swr_in_rate = rate;
+    d->swr_in_fmt = fmt;
+    d->swr_in_channels = in_layout.nb_channels;
+    av_channel_layout_uninit(&in_layout);
     if (rc < 0 || !d->swr) {
         return -EINVAL;
     }
@@ -181,39 +198,59 @@ static int init_resampler(Decoder *d) {
     return 0;
 }
 
-int decoder_open(Decoder **out, const char *path) {
-    if (!out || !path) {
-        return -EINVAL;
-    }
-    *out = NULL;
-    silence_ffmpeg_logs();
+static int init_resampler(Decoder *d) {
+    return init_resampler_for(d, &d->codec->ch_layout, d->codec->sample_fmt,
+                              d->codec->sample_rate);
+}
 
-    Decoder *d = calloc(1, sizeof(*d));
-    if (!d) {
+/* AAC from an MP4/M4B through mp4lite: same decoder, a fraction of the memory. */
+static int open_codec_mp4lite(Decoder *d, const char *path) {
+    Mp4LiteInfo mi;
+    if (mp4lite_open(&d->mp4, path, &mi) < 0) {
+        return -ENOTSUP;
+    }
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_AAC);
+    d->codec = codec ? avcodec_alloc_context3(codec) : NULL;
+    if (!d->codec) {
+        return -ENOTSUP;
+    }
+    d->codec->extradata = av_mallocz(mi.asc_len + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!d->codec->extradata) {
         return -ENOMEM;
     }
-    d->stream_idx = -1;
-    d->discard_until_ms = -1;
+    memcpy(d->codec->extradata, mi.asc, mi.asc_len);
+    d->codec->extradata_size = (int)mi.asc_len;
+    d->codec->sample_rate = mi.sample_rate;
+    av_channel_layout_default(&d->codec->ch_layout, mi.channels > 0 ? mi.channels : 2);
+    d->time_base = (AVRational){1, (int)mi.timescale};
+    d->codec->pkt_timebase = d->time_base;
+    d->duration_ms = av_rescale_q(mi.duration, d->time_base, (AVRational){1, 1000});
+    if (avcodec_open2(d->codec, codec, NULL) < 0) {
+        return -EINVAL;
+    }
+    d->stream_idx = 0;
+    return 0;
+}
 
+static int open_codec_avformat(Decoder *d, const char *path) {
     if (avformat_open_input(&d->fmt, path, NULL, NULL) < 0) {
-        decoder_close(d);
         return -ENOENT;
     }
     if (avformat_find_stream_info(d->fmt, NULL) < 0) {
-        decoder_close(d);
         return -EINVAL;
     }
 
     for (unsigned i = 0; i < d->fmt->nb_streams; i++) {
         AVStream *st = d->fmt->streams[i];
         if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
-            !(st->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            !(st->disposition & AV_DISPOSITION_ATTACHED_PIC) && d->stream_idx < 0) {
             d->stream_idx = (int)i;
-            break;
+        } else {
+            /* Never read cover art or chapter-text packets during playback. */
+            st->discard = AVDISCARD_ALL;
         }
     }
     if (d->stream_idx < 0) {
-        decoder_close(d);
         return -EINVAL;
     }
 
@@ -227,23 +264,62 @@ int decoder_open(Decoder **out, const char *path) {
 
     const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!codec) {
-        decoder_close(d);
         return -ENOTSUP;
     }
-
     d->codec = avcodec_alloc_context3(codec);
     if (!d->codec) {
-        decoder_close(d);
         return -ENOMEM;
     }
     if (avcodec_parameters_to_context(d->codec, st->codecpar) < 0) {
-        decoder_close(d);
         return -EINVAL;
     }
     d->codec->pkt_timebase = st->time_base;
     if (avcodec_open2(d->codec, codec, NULL) < 0) {
-        decoder_close(d);
         return -EINVAL;
+    }
+    return 0;
+}
+
+static Decoder *decoder_alloc(void) {
+    Decoder *d = calloc(1, sizeof(*d));
+    if (d) {
+        d->stream_idx = -1;
+        d->discard_until_ms = -1;
+    }
+    return d;
+}
+
+static void decoder_release_codec(Decoder *d) {
+    if (d->codec) avcodec_free_context(&d->codec);
+    if (d->fmt) avformat_close_input(&d->fmt);
+    mp4lite_close(d->mp4);
+    d->mp4 = NULL;
+    d->stream_idx = -1;
+    d->duration_ms = 0;
+}
+
+int decoder_open_ex(Decoder **out, const char *path, unsigned flags) {
+    if (!out || !path) {
+        return -EINVAL;
+    }
+    *out = NULL;
+    silence_ffmpeg_logs();
+
+    Decoder *d = decoder_alloc();
+    if (!d) {
+        return -ENOMEM;
+    }
+
+    const char *env = getenv("ALOUD_NO_MP4LITE");
+    bool try_lite = !(flags & DECODER_FLAG_NO_MP4LITE) && !(env && env[0] == '1');
+    int rc = try_lite ? open_codec_mp4lite(d, path) : -ENOTSUP;
+    if (rc < 0) {
+        decoder_release_codec(d);
+        rc = open_codec_avformat(d, path);
+    }
+    if (rc < 0) {
+        decoder_close(d);
+        return rc;
     }
 
     if (init_resampler(d) < 0) {
@@ -264,14 +340,21 @@ int decoder_open(Decoder **out, const char *path) {
     return 0;
 }
 
+int decoder_open(Decoder **out, const char *path) {
+    return decoder_open_ex(out, path, 0);
+}
+
+bool decoder_uses_mp4lite(const Decoder *d) {
+    return d && d->mp4 != NULL;
+}
+
 void decoder_close(Decoder *d) {
     if (!d) return;
     free(d->fifo_buf);
     if (d->frame) av_frame_free(&d->frame);
     if (d->pkt) av_packet_free(&d->pkt);
     if (d->swr) swr_free(&d->swr);
-    if (d->codec) avcodec_free_context(&d->codec);
-    if (d->fmt) avformat_close_input(&d->fmt);
+    decoder_release_codec(d);
     free(d);
 }
 
@@ -310,6 +393,16 @@ static int push_decoded_frame(Decoder *d, const AVFrame *frame) {
         if (ms >= 0) {
             d->current_pts_ms = ms;
             d->frames_since_pts = 0;
+        }
+    }
+
+    if (frame->sample_rate <= 0 || frame->ch_layout.nb_channels <= 0 || frame->nb_samples <= 0) {
+        return 0; /* damaged frame: drop it, keep playing */
+    }
+    if (!d->swr || frame->sample_rate != d->swr_in_rate || frame->format != d->swr_in_fmt ||
+        frame->ch_layout.nb_channels != d->swr_in_channels) {
+        if (init_resampler_for(d, &frame->ch_layout, frame->format, frame->sample_rate) < 0) {
+            return -EINVAL;
         }
     }
 
@@ -360,6 +453,38 @@ static int push_decoded_frame(Decoder *d, const AVFrame *frame) {
     return 0;
 }
 
+/* Next packet of the chosen stream into d->pkt: 0 on success, AVERROR on end/error. */
+static int read_audio_packet(Decoder *d) {
+    if (!d->mp4) {
+        return av_read_frame(d->fmt, d->pkt);
+    }
+    uint32_t size = 0;
+    int64_t pts = 0;
+    if (mp4lite_peek(d->mp4, &size, &pts) <= 0 || size == 0 || size > INT32_MAX) {
+        return AVERROR_EOF;
+    }
+    if (av_new_packet(d->pkt, (int)size) < 0) {
+        return AVERROR(ENOMEM);
+    }
+    if (mp4lite_read(d->mp4, d->pkt->data, size) < 0) {
+        av_packet_unref(d->pkt);
+        return AVERROR_EOF; /* truncated file: play what we have, then stop cleanly */
+    }
+    d->pkt->pts = pts;
+    d->pkt->dts = pts;
+    d->pkt->stream_index = 0;
+    if (pts < 0 && d->codec->sample_rate > 0) {
+        /* Encoder priming before the edit-list start: have the decoder drop it, exactly
+         * as libavformat does with the same edit list. */
+        int64_t skip = av_rescale(-pts, d->codec->sample_rate, d->time_base.den);
+        uint8_t *sd = av_packet_new_side_data(d->pkt, AV_PKT_DATA_SKIP_SAMPLES, 10);
+        if (sd && skip > 0 && skip < INT32_MAX) {
+            AV_WL32(sd, (uint32_t)skip);
+        }
+    }
+    return 0;
+}
+
 int decoder_read_frames(Decoder *d, int16_t *pcm_out, int max_frames) {
     if (!d || !pcm_out || max_frames <= 0) {
         return -EINVAL;
@@ -394,7 +519,7 @@ int decoder_read_frames(Decoder *d, int16_t *pcm_out, int max_frames) {
             continue;
         } else if (rc == AVERROR_EOF) {
             /* Drain any buffered resampler samples. */
-            int delay = swr_get_out_samples(d->swr, 0);
+            int delay = d->swr ? swr_get_out_samples(d->swr, 0) : 0;
             if (delay > 0 && ensure_fifo_space(d, delay) == 0) {
                 uint8_t *out_ptr[1] = {
                     (uint8_t *)(d->fifo_buf + (size_t)d->fifo_len_frames * DECODER_OUT_CHANNELS)
@@ -419,7 +544,7 @@ int decoder_read_frames(Decoder *d, int16_t *pcm_out, int max_frames) {
             continue;
         }
 
-        int rrc = av_read_frame(d->fmt, d->pkt);
+        int rrc = read_audio_packet(d);
         if (rrc < 0) {
             d->eof_reached = true;
             avcodec_send_packet(d->codec, NULL);
@@ -451,11 +576,17 @@ int decoder_seek_ms(Decoder *d, int64_t target_ms) {
     }
 
     int64_t target_ts = av_rescale_q(target_ms, (AVRational){1, 1000}, d->time_base);
-    int rc = av_seek_frame(d->fmt, d->stream_idx, target_ts, AVSEEK_FLAG_BACKWARD);
-    if (rc < 0) {
-        rc = av_seek_frame(d->fmt, d->stream_idx, target_ts, AVSEEK_FLAG_ANY);
-        if (rc < 0) {
+    if (d->mp4) {
+        if (mp4lite_seek(d->mp4, target_ts, NULL) < 0) {
             return -EIO;
+        }
+    } else {
+        int rc = av_seek_frame(d->fmt, d->stream_idx, target_ts, AVSEEK_FLAG_BACKWARD);
+        if (rc < 0) {
+            rc = av_seek_frame(d->fmt, d->stream_idx, target_ts, AVSEEK_FLAG_ANY);
+            if (rc < 0) {
+                return -EIO;
+            }
         }
     }
 
