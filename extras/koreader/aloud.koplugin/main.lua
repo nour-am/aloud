@@ -60,6 +60,21 @@ local function read_status()
     return state, chapter, book
 end
 
+-- Show "Aloud audiobook" first in the Tools tab (reader and file browser). KOReader
+-- places menu items in the order its menu_order tables list them and appends any
+-- plugin item it doesn't know at the end; naming ours first in those tables is the
+-- supported way to move it. Guarded: if a table is missing, the item just stays last.
+local function put_first_in_tools(module_name)
+    local ok, order = pcall(require, module_name)
+    if not ok or type(order) ~= "table" or type(order.tools) ~= "table" then return end
+    for _i, id in ipairs(order.tools) do
+        if id == "aloud" then return end
+    end
+    table.insert(order.tools, 1, "aloud")
+end
+put_first_in_tools("ui/elements/reader_menu_order")
+put_first_in_tools("ui/elements/filemanager_menu_order")
+
 local Aloud = WidgetContainer:extend{
     name = "aloud",
     is_doc_only = false,

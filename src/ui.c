@@ -35,6 +35,20 @@ void ui_format_clock_ms(int64_t ms, bool neg_prefix, char *out, size_t cap) {
     }
 }
 
+void ui_format_timestamp_ms(int64_t ms, bool with_hours, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    if (ms < 0) ms = 0;
+    int64_t total_sec = ms / 1000; /* floor: a chapter starting at 59.6 s starts at 0:59 */
+    int64_t hrs = total_sec / 3600;
+    int64_t mins = (total_sec % 3600) / 60;
+    int64_t secs = total_sec % 60;
+    if (with_hours || hrs > 0) {
+        snprintf(out, cap, "%" PRId64 ":%02" PRId64 ":%02" PRId64, hrs, mins, secs);
+    } else {
+        snprintf(out, cap, "%02" PRId64 ":%02" PRId64, mins, secs);
+    }
+}
+
 void ui_format_hours_left_ms(int64_t ms, char *out, size_t cap) {
     if (!out || cap == 0) return;
     if (ms < 0) ms = 0;
@@ -1228,8 +1242,11 @@ static void render_chapters_screen(Ui *ui) {
         text_draw_line(ui->text, c, is_current ? FONT_SANS_BOLD : FONT_SANS_REGULAR,
                        row_px, tx, ty, tw, ch->title, TONE_BLACK, TEXT_ALIGN_LEFT);
 
+        /* Where the chapter starts in the book (owner's request); with hours on every
+         * row once the book passes an hour, so the column stays aligned. */
         char dur_str[32];
-        ui_format_clock_ms(ch->duration_ms, false, dur_str, sizeof(dur_str));
+        ui_format_timestamp_ms(ch->start_book_ms, b->total_duration_ms >= 3600000LL,
+                               dur_str, sizeof(dur_str));
         text_draw_line(ui->text, c, is_current ? FONT_SANS_BOLD : FONT_SANS_REGULAR,
                        row_px, c->width - margin - dur_w, ty, dur_w,
                        dur_str, is_current ? TONE_BLACK : TONE_INK_GRAY,

@@ -35,6 +35,20 @@ static int g_tests_failed = 0;
     } \
 } while (0)
 
+static void test_chapter_timestamps(void) {
+    char out[32];
+    ui_format_timestamp_ms(0, false, out, sizeof(out));
+    CHECK(strcmp(out, "00:00") == 0, "start of book: %s", out);
+    ui_format_timestamp_ms(59600, false, out, sizeof(out));
+    CHECK(strcmp(out, "00:59") == 0, "floors, never shows a later time: %s", out);
+    ui_format_timestamp_ms(398472, true, out, sizeof(out));
+    CHECK(strcmp(out, "0:06:38") == 0, "hours on every row of a long book: %s", out);
+    ui_format_timestamp_ms(30927000, true, out, sizeof(out));
+    CHECK(strcmp(out, "8:35:27") == 0, "8.6 h book: %s", out);
+    ui_format_timestamp_ms(3725000, false, out, sizeof(out));
+    CHECK(strcmp(out, "1:02:05") == 0, "hours appear when needed: %s", out);
+}
+
 static void test_natural_sort(void) {
     CHECK(lib_natural_cmp("Chapter 2.mp3", "Chapter 10.mp3") < 0, "2 should sort before 10");
     CHECK(lib_natural_cmp("02 The River.mp3", "10 The Fire.mp3") < 0, "02 should sort before 10");
@@ -838,6 +852,7 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN); /* as src/main.c does: a dead helper must not kill us */
 
     test_natural_sort();
+    test_chapter_timestamps();
     test_store_persistence_and_recovery(fixture_dir);
     test_decoder_m4b_and_corrupt(fixture_dir);
     test_mp4lite_reader(fixture_dir);

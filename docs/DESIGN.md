@@ -80,7 +80,8 @@ Top to bottom:
   paused.
 
 ### Chapters
-- Paginated list: chapter title, duration right-aligned. Current chapter in bold with a
+- Paginated list: chapter title, and right-aligned the time in the book where it starts
+  (`mm:ss`, or `h:mm:ss` on every row once the book is over an hour). Current chapter in bold with a
   black left bar. Tap → seek to chapter start and return to Player.
 
 ### Sheets (Speed, Sleep)

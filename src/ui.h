@@ -138,5 +138,7 @@ bool ui_on_player_tick(Ui *ui, AloudRect *out_rect, AloudWaveform *out_wfm);
 /* Format helpers exposed for unit testing. */
 void ui_format_clock_ms(int64_t ms, bool neg_prefix, char *out, size_t cap);
 void ui_format_hours_left_ms(int64_t ms, char *out, size_t cap);
+/* Chapter start time: "mm:ss", or "h:mm:ss" when with_hours or past an hour. */
+void ui_format_timestamp_ms(int64_t ms, bool with_hours, char *out, size_t cap);
 
 #endif /* ALOUD_UI_H */
