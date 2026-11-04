@@ -11,6 +11,7 @@
 #include "text.h"
 #include "ui.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -82,6 +83,59 @@ static void control_close(Control *c) {
 }
 
 /* Apply every complete command line waiting in the FIFO. Returns true if any ran. */
+/* One line for readers (the KOReader plugin) to show after a control tap:
+ * "playing|paused<TAB>chapter title<TAB>book title". Lives in /var/tmp (RAM), is
+ * rewritten only when it changes, and is removed on exit. */
+static void status_write(const char *path, Player *player, char *last, size_t last_cap) {
+    if (!path || !path[0]) return;
+    PlayerSnapshot snap;
+    player_get_snapshot(player, &snap);
+    char line[600];
+    const char *chap = "";
+    if (snap.book && snap.chapter_index >= 0 && (size_t)snap.chapter_index < snap.book->chapter_count) {
+        chap = snap.book->chapters[snap.chapter_index].title;
+    }
+    snprintf(line, sizeof(line), "%s\t%s\t%s\n", snap.playing ? "playing" : "paused", chap,
+             snap.book ? snap.book->title : "");
+    if (strcmp(line, last) == 0) return;
+    snprintf(last, last_cap, "%s", line);
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *fp = fopen(tmp, "w");
+    if (!fp) return;
+    fputs(line, fp);
+    if (fclose(fp) == 0) (void)rename(tmp, path);
+}
+
+/* KOReader (and anything following its launcher) SIGSTOPs volumd to keep USB drive mode
+ * from taking /mnt/us away while it runs; a cable is then harmless to us. */
+static bool usb_storage_blocked(void) {
+    DIR *d = opendir("/proc");
+    if (!d) return false;
+    bool blocked = false;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] < '1' || e->d_name[0] > '9') continue;
+        char path[64], buf[128];
+        snprintf(path, sizeof(path), "/proc/%s/stat", e->d_name);
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+        size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+        fclose(fp);
+        buf[n] = '\0';
+        /* "<pid> (volumd) T ..." */
+        char *open_paren = strchr(buf, '(');
+        char *close_paren = strrchr(buf, ')');
+        if (!open_paren || !close_paren || close_paren < open_paren) continue;
+        if ((size_t)(close_paren - open_paren - 1) == 6 && strncmp(open_paren + 1, "volumd", 6) == 0) {
+            blocked = (close_paren[1] == ' ' && close_paren[2] == 'T');
+            break;
+        }
+    }
+    closedir(d);
+    return blocked;
+}
+
 static bool control_handle(Control *c, Player *player) {
     bool any = false;
     for (;;) {
@@ -103,6 +157,12 @@ static bool control_handle(Control *c, Player *player) {
                 any = true;
             } else if (strcmp(c->buf, "fwd") == 0) {
                 player_seek_relative_ms(player, 30000);
+                any = true;
+            } else if (strcmp(c->buf, "next") == 0) {
+                player_next_chapter(player);
+                any = true;
+            } else if (strcmp(c->buf, "prev") == 0) {
+                player_prev_chapter(player);
                 any = true;
             }
             size_t rem = c->len - (size_t)(nl - c->buf + 1);
@@ -567,6 +627,7 @@ int main(int argc, char **argv) {
     float top_inset_mm = 0.0f;
     pid_t launcher_pid = 0;
     const char *control_path = NULL;
+    const char *status_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--library") == 0 && i + 1 < argc) {
@@ -589,6 +650,8 @@ int main(int argc, char **argv) {
             launcher_pid = (v > 1) ? (pid_t)v : 0;
         } else if (strcmp(argv[i], "--control") == 0 && i + 1 < argc) {
             control_path = argv[++i];
+        } else if (strcmp(argv[i], "--status") == 0 && i + 1 < argc) {
+            status_path = argv[++i];
         } else if (strcmp(argv[i], "--helpers") == 0 && i + 1 < argc) {
             helper_dir = argv[++i];
         } else if (strcmp(argv[i], "--export-screens") == 0 && i + 1 < argc) {
@@ -732,6 +795,7 @@ int main(int argc, char **argv) {
     int64_t bg_paused_since = -1;
     Control ctl;
     control_open(&ctl, control_path);
+    char status_last[600] = "";
 
     /* Main poll() event loop: zero wakeups when paused and idle (D7), and none while
      * playing in the background either (the audio thread autosaves on its own). */
@@ -869,7 +933,9 @@ int main(int argc, char **argv) {
         }
 
         if (ctl_slot >= 0 && (pfds[ctl_slot].revents & POLLIN)) {
-            if (control_handle(&ctl, player) && !in_bg && !power.in_screensaver) {
+            bool handled = control_handle(&ctl, player);
+            if (handled && in_bg) status_write(status_path, player, status_last, sizeof(status_last));
+            if (handled && !in_bg && !power.in_screensaver) {
                 AloudRect r;
                 AloudWaveform w;
                 ui_render_full(&ui, false, &r, &w);
@@ -889,7 +955,9 @@ int main(int argc, char **argv) {
             }
             if (power.charging_event) {
                 power.charging_event = false;
-                if (in_bg) {
+                if (in_bg && usb_storage_blocked()) {
+                    printf("aloud: cable plugged in, USB drive mode is blocked (KOReader): keep playing\n");
+                } else if (in_bg) {
                     /* A cable may mean USB drive mode, which takes /mnt/us away from under
                      * our open book and our own binary. Let go of it completely (D13). */
                     printf("aloud: cable plugged in, stopping background playback\n");
@@ -908,6 +976,7 @@ int main(int argc, char **argv) {
         bool notify_fired = (notify_slot >= 0 && (pfds[notify_slot].revents & POLLIN));
         if (notify_fired) {
             player_clear_notify(player);
+            if (in_bg) status_write(status_path, player, status_last, sizeof(status_last));
         }
         if ((notify_fired || (pr == 0 && snap.playing)) && !power.in_screensaver && !in_bg) {
             AloudRect r;
@@ -941,6 +1010,8 @@ int main(int argc, char **argv) {
                 bg_paused_since = -1;
                 printf("aloud: background\n");
                 fflush(stdout);
+                status_last[0] = '\0';
+                status_write(status_path, player, status_last, sizeof(status_last));
                 if (launcher_pid > 0) (void)kill(launcher_pid, SIGUSR1);
                 break;
             }
@@ -948,6 +1019,7 @@ int main(int argc, char **argv) {
     }
 
     control_close(&ctl);
+    if (status_path) (void)unlink(status_path);
 
     /* Always persist the current position before exiting (D8, D9). */
     (void)player_save_position_now(player);

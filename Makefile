@@ -147,6 +147,8 @@ package: kindle
 	cp tools/kindle-diagnose.sh build/pkg/extensions/aloud/bin/kindle-diagnose.sh
 	cp tools/kindle-audio-test.sh build/pkg/extensions/aloud/bin/kindle-audio-test.sh
 	cp tools/kindle-perf.sh build/pkg/extensions/aloud/bin/kindle-perf.sh
+	mkdir -p build/pkg/extensions/aloud/koreader
+	cp -R extras/koreader/aloud.koplugin build/pkg/extensions/aloud/koreader/
 	chmod +x build/pkg/extensions/aloud/bin/*
 	cp third_party/fonts/Literata-Regular.ttf \
 	   third_party/fonts/Literata-SemiBold.ttf \

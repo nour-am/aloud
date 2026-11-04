@@ -110,6 +110,12 @@ Install the new build, open a long M4B in Aloud, play it, then:
   Audio keeps playing; waking shows the normal lock screen; the passcode works.
 - [ ] **Sleep timer in background:** set 5 min, go to background, read. Audio fades and
   stops; ~10 min later `aloud.log` shows `paused in background ... exiting`.
+- [ ] **KOReader plugin:** copy `extensions/aloud/koreader/aloud.koplugin` to
+  `koreader/plugins/`. In a book: Tools → Aloud audiobook → each item works and shows a
+  notification; bind "Aloud: play / pause" to a gesture and use it while reading. With
+  Aloud closed, an action shows "Aloud isn't playing in the background".
+- [ ] **Charging in KOReader:** while reading in KOReader with Aloud in background, plug
+  in: audio keeps playing (`aloud.log`: `USB drive mode is blocked (KOReader)`).
 - [ ] **Cable:** while playing in background, plug into a computer. Audio stops,
   `aloud.log` shows `cable plugged in`, USB drive mode works and the position is saved.
 - [ ] **Exit from background leaves the screen alone:** after the cable test, unplug: the

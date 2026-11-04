@@ -189,6 +189,70 @@ static void test_mp4lite_reader(const char *fixture_dir) {
     }
 }
 
+static const Book *find_book(const Library *lib, const char *needle) {
+    for (size_t i = 0; i < lib->count; i++) {
+        if (strstr(lib->books[i].title, needle)) return &lib->books[i];
+    }
+    return NULL;
+}
+
+/* Chapters are cached so a long M4B is not re-probed by libavformat (~100 MB) on every
+ * launch, and a damaged cache falls back to probing (ARCHITECTURE.md D14). */
+static void test_chapter_cache(const char *fixture_dir) {
+    char lib_dir[1024], state_dir[1024], chap_path[1100];
+    snprintf(lib_dir, sizeof(lib_dir), "%s/library", fixture_dir);
+    snprintf(state_dir, sizeof(state_dir), "%s/tmp/chapcache_state", fixture_dir);
+    mkdir(state_dir, 0755);
+    snprintf(chap_path, sizeof(chap_path), "%s/chapters.tsv", state_dir);
+    char lib_tsv[1100];
+    snprintf(lib_tsv, sizeof(lib_tsv), "%s/library.tsv", state_dir);
+    unlink(chap_path);
+    unlink(lib_tsv);
+
+    Store store;
+    store_init(&store);
+    Library lib;
+    lib_init(&lib);
+    CHECK(lib_scan(&lib, lib_dir, state_dir, &store) == 0, "first scan probes");
+    const Book *moby = find_book(&lib, "Moby");
+    CHECK(moby && moby->chapter_count == 4, "4 chapters from probe");
+    lib_free(&lib);
+
+    /* Prove the second scan reads the cache: alter a cached title. */
+    FILE *fp = fopen(chap_path, "r");
+    CHECK(fp != NULL, "chapters.tsv written");
+    static char buf[65536];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    CHECK(strstr(buf, "# end\n") != NULL && strstr(buf, "Loomings") != NULL, "chapters.tsv complete");
+    char *hit = strstr(buf, "Loomings");
+    memcpy(hit, "Cachedxx", 8);
+    fp = fopen(chap_path, "w");
+    fputs(buf, fp);
+    fclose(fp);
+
+    lib_init(&lib);
+    CHECK(lib_scan(&lib, lib_dir, state_dir, &store) == 0, "second scan");
+    moby = find_book(&lib, "Moby");
+    CHECK(moby && moby->chapter_count == 4 && strstr(moby->chapters[0].title, "Cachedxx"),
+          "second scan uses cached chapters, no libavformat probe");
+    lib_free(&lib);
+
+    /* A cache cut short (power loss mid-write) is ignored and the file probed again. */
+    char *end = strstr(buf, "# end\n");
+    *end = '\0';
+    fp = fopen(chap_path, "w");
+    fputs(buf, fp);
+    fclose(fp);
+    lib_init(&lib);
+    CHECK(lib_scan(&lib, lib_dir, state_dir, &store) == 0, "scan with truncated cache");
+    moby = find_book(&lib, "Moby");
+    CHECK(moby && moby->chapter_count == 4 && strstr(moby->chapters[0].title, "Loomings"),
+          "truncated chapter cache falls back to probing");
+    lib_free(&lib);
+}
+
 /* Capturing AudioOut: records the first 2048 frames written after a reset so tests
  * can inspect the start-of-playback ramp. */
 static int16_t g_cap_buf[2048 * 2];
@@ -777,6 +841,7 @@ int main(int argc, char **argv) {
     test_store_persistence_and_recovery(fixture_dir);
     test_decoder_m4b_and_corrupt(fixture_dir);
     test_mp4lite_reader(fixture_dir);
+    test_chapter_cache(fixture_dir);
     test_library_and_player_engine(fixture_dir);
     test_power_and_touch_decoders();
     test_gst_backend_with_fake_helper(fixture_dir);

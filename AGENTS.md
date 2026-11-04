@@ -69,6 +69,10 @@ Background playback (`feat/background-playback`, 2026-11-03, owner's PW5 on FW 5
 - `src/mp4lite.c`: M4B/MP4 audio without libavformat's per-frame index — the owner's
   8.6 h book went from 113 MB to 4.7 MB peak (D14). `aloud --bench <file>` and KUAL
   "Measure Performance" (`tools/kindle-perf.sh`) measure it on the device.
+- KOReader companion plugin `extras/koreader/aloud.koplugin` (menu + gesture actions over
+  the same FIFO); embedded chapters cached in `state/chapters.tsv` so long M4Bs aren't
+  re-probed (~100 MB) at every launch.
+- Owner reads in KOReader (EPUBs in `/mnt/us/Books`), not Amazon's reader.
 - Needs DEVICE-TESTING.md Phase 5 on the Kindle.
 
 Next step (requires physical Kindle hardware):
@@ -94,6 +98,7 @@ tools/arm-ar, tools/arm-ranlib
 tools/kindle-diagnose.sh   read-only on-device fact finder (scriptlet)
 tools/kindle-audio-test.sh standalone 10 s 440 Hz tone smoke-test scriptlet
 tools/kindle-perf.sh       on-device CPU/RAM snapshot + decode benchmark (aloud-perf.txt)
+extras/koreader/           optional KOReader plugin: Aloud controls inside KOReader
 helper/aloud_sink.c     dynamic glibc helper: dlopen libgstreamer-1.0/0.10, fdsrc ! mixersink
 src/                    C11 application modules (store, decoder, library, player, power, ui, platform)
 tests/                  gen_fixtures.sh + test_main.c (C checks) + test_launcher.sh

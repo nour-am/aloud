@@ -9,8 +9,8 @@
 #   aloud  --SIGUSR1--> launcher  "I let go of screen and input": give the Kindle UI back.
 #   launcher --SIGUSR2--> aloud   "the screen is yours again" (after another launch).
 #
-# Usage: aloud.sh [--choose-folder]          open Aloud (or bring it back to the front)
-#        aloud.sh --ctl toggle|back|fwd      control background playback from KUAL
+# Usage: aloud.sh [--choose-folder]                    open Aloud (or bring it to the front)
+#        aloud.sh --ctl toggle|back|fwd|prev|next      control background playback
 
 # The overrides exist only for tests/test_launcher.sh, which runs this on a host.
 ALOUD_DIR="${ALOUD_TEST_DIR:-/mnt/us/extensions/aloud}"
@@ -20,6 +20,7 @@ ALOUD_LOG="$ALOUD_DIR/state/aloud.log"
 PID_FILE="$RUN_DIR/aloud.pid"      # pid of the launcher that owns the running aloud
 BG_FLAG="$RUN_DIR/aloud.bg"        # exists while aloud plays in the background
 CTL_FIFO="$RUN_DIR/aloud.ctl"      # created by aloud (--control)
+STATUS_FILE="$RUN_DIR/aloud.state" # "playing|paused<TAB>chapter<TAB>book", for KOReader
 FB_DUMP="$RUN_DIR/aloud-fb.dump"
 PASSWD_FLAG="${ALOUD_TEST_PASSWD:-/var/local/system/userpasswdenabled}"
 PASSWD_BAK="$RUN_DIR/aloud-userpasswdenabled"
@@ -178,7 +179,7 @@ cleanup() {
     kill -KILL "$ALOUD_PID" 2>/dev/null
   fi
   killall -TERM aloud-sink aloud-sink-armhf aloud-sink-armel 2>/dev/null || true
-  rm -f /tmp/aloud_audio.fifo "$CTL_FIFO" 2>/dev/null || true
+  rm -f /tmp/aloud_audio.fifo "$CTL_FIFO" "$STATUS_FILE" 2>/dev/null || true
 
   # Ensure screensaver inhibition and Bluetooth connection hold are never left stuck on.
   if command -v lipc-set-prop >/dev/null 2>&1; then
@@ -228,6 +229,7 @@ echo "aloud: launch $(date) helpers=$HELPER_DIR top_inset_mm=$TOP_INSET_MM" >>"$
   --helpers "$HELPER_DIR" \
   --launcher-pid "$$" \
   --control "$CTL_FIFO" \
+  --status "$STATUS_FILE" \
   "$@" >>"$ALOUD_LOG" 2>&1 &
 ALOUD_PID=$!
 

@@ -163,6 +163,11 @@ typedef struct {
     char artist[256];
     char album_artist[256];
     int has_chapters;
+    /* Embedded chapters, cached in chapters.tsv. Without them a book with chapters would
+     * be re-probed by libavformat at every launch, which for a long M4B means ~100 MB
+     * of transient RAM (ARCHITECTURE.md D14). NULL/0 = not cached: probe. */
+    DecoderChapter *chapters;
+    size_t chapter_count;
 } CacheRow;
 
 typedef struct {
@@ -172,6 +177,7 @@ typedef struct {
 } MetaCache;
 
 static void cache_free(MetaCache *mc) {
+    for (size_t i = 0; i < mc->count; i++) free(mc->rows[i].chapters);
     free(mc->rows);
     mc->rows = NULL;
     mc->count = 0;
@@ -181,6 +187,94 @@ static void cache_free(MetaCache *mc) {
 static void sanitize_tsv_field(char *s) {
     for (; *s; s++) {
         if (*s == '\t' || *s == '\n' || *s == '\r') *s = ' ';
+    }
+}
+
+static CacheRow *cache_row_mut(MetaCache *mc, const char *relpath, int64_t size, int64_t mtime) {
+    for (size_t i = 0; i < mc->count; i++) {
+        if (mc->rows[i].size == size && mc->rows[i].mtime == mtime &&
+            strcmp(mc->rows[i].relpath, relpath) == 0) {
+            return &mc->rows[i];
+        }
+    }
+    return NULL;
+}
+
+/* chapters.tsv: "relpath size mtime start_ms end_ms title" per chapter, then "# end".
+ * A file without the end marker (power cut mid-write) is ignored as a whole: the books
+ * are simply probed again. */
+static void chapters_load(MetaCache *mc, const char *state_dir) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/chapters.tsv", state_dir);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+    char line[2048];
+    bool complete = false;
+    while (fgets(line, sizeof(line), fp)) {
+        size_t l = strlen(line);
+        if (l > 0 && line[l - 1] == '\n') line[l - 1] = '\0';
+        if (strcmp(line, "# end") == 0) {
+            complete = true;
+            break;
+        }
+        if (line[0] == '#' || line[0] == '\0') continue;
+        char *f[6] = {0};
+        char *p = line;
+        int nf = 0;
+        for (; nf < 6; nf++) {
+            f[nf] = p;
+            char *tab = (nf < 5) ? strchr(p, '\t') : NULL;
+            if (!tab) {
+                nf++;
+                break;
+            }
+            *tab = '\0';
+            p = tab + 1;
+        }
+        if (nf < 6) continue;
+        CacheRow *r = cache_row_mut(mc, f[0], strtoll(f[1], NULL, 10), strtoll(f[2], NULL, 10));
+        if (!r || r->chapter_count >= DECODER_MAX_CHAPTERS) continue;
+        if (!r->chapters) {
+            r->chapters = calloc(DECODER_MAX_CHAPTERS, sizeof(DecoderChapter));
+            if (!r->chapters) continue;
+        }
+        DecoderChapter *c = &r->chapters[r->chapter_count++];
+        c->start_ms = strtoll(f[3], NULL, 10);
+        c->end_ms = strtoll(f[4], NULL, 10);
+        snprintf(c->title, sizeof(c->title), "%s", f[5]);
+    }
+    fclose(fp);
+    if (!complete) {
+        for (size_t i = 0; i < mc->count; i++) {
+            free(mc->rows[i].chapters);
+            mc->rows[i].chapters = NULL;
+            mc->rows[i].chapter_count = 0;
+        }
+    }
+}
+
+static void chapters_save(const MetaCache *mc, const char *state_dir) {
+    char tmp[1024], dst[1024];
+    snprintf(tmp, sizeof(tmp), "%s/chapters.tsv.tmp", state_dir);
+    snprintf(dst, sizeof(dst), "%s/chapters.tsv", state_dir);
+    FILE *fp = fopen(tmp, "w");
+    if (!fp) return;
+    fputs("# aloud-chapters-cache-v1\n", fp);
+    for (size_t i = 0; i < mc->count; i++) {
+        const CacheRow *r = &mc->rows[i];
+        for (size_t k = 0; k < r->chapter_count; k++) {
+            fprintf(fp, "%s\t%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%" PRId64 "\t%s\n",
+                    r->relpath, r->size, r->mtime, r->chapters[k].start_ms,
+                    r->chapters[k].end_ms, r->chapters[k].title);
+        }
+    }
+    fputs("# end\n", fp);
+    bool ok = (fflush(fp) == 0) && !ferror(fp);
+    if (fclose(fp) != 0) ok = false;
+    if (ok) {
+        rename(tmp, dst);
+    } else {
+        unlink(tmp);
     }
 }
 
@@ -233,6 +327,7 @@ static void cache_load(MetaCache *mc, const char *state_dir) {
         r->has_chapters = (int)strtol(fields[9], NULL, 10);
     }
     fclose(fp);
+    chapters_load(mc, state_dir);
 }
 
 static const CacheRow *cache_find(const MetaCache *mc, const char *relpath, int64_t size, int64_t mtime) {
@@ -267,6 +362,18 @@ static void cache_add(MetaCache *mc, const char *relpath, int64_t size, int64_t 
     snprintf(r->artist, sizeof(r->artist), "%s", info->artist);
     snprintf(r->album_artist, sizeof(r->album_artist), "%s", info->album_artist);
     r->has_chapters = (info->chapter_count > 0) ? 1 : 0;
+    if (info->chapter_count > 0) {
+        size_t n = info->chapter_count < DECODER_MAX_CHAPTERS ? info->chapter_count : DECODER_MAX_CHAPTERS;
+        r->chapters = malloc(n * sizeof(DecoderChapter));
+        if (r->chapters) {
+            memcpy(r->chapters, info->chapters, n * sizeof(DecoderChapter));
+            r->chapter_count = n;
+            for (size_t k = 0; k < n; k++) {
+                r->chapters[k].title[sizeof(r->chapters[k].title) - 1] = '\0';
+                sanitize_tsv_field(r->chapters[k].title);
+            }
+        }
+    }
 
     sanitize_tsv_field(r->relpath);
     sanitize_tsv_field(r->title);
@@ -294,6 +401,7 @@ static void cache_save(const MetaCache *mc, const char *state_dir) {
     }
     fflush(fp);
     fclose(fp);
+    chapters_save(mc, state_dir); /* before library.tsv: a row never points at missing chapters */
     rename(tmp, dst);
 }
 
@@ -492,9 +600,14 @@ static int probe_or_cached(const char *rel_key, const char *fullpath,
     int64_t fmtime = (int64_t)st.st_mtime;
 
     const CacheRow *cached = cache_find(old_cache, rel_key, fsize, fmtime);
-    /* Use cached row when we don't need embedded chapters or raw cover bytes. */
-    if (cached && !cached->has_chapters && !want_cover) {
+    /* Use the cached row unless we need raw cover bytes, or the file has chapters that
+     * aren't cached (older cache, or chapters.tsv lost). */
+    if (cached && (!cached->has_chapters || cached->chapter_count > 0) && !want_cover) {
         memset(out_info, 0, sizeof(*out_info));
+        for (size_t k = 0; k < cached->chapter_count; k++) {
+            out_info->chapters[k] = cached->chapters[k];
+        }
+        out_info->chapter_count = cached->chapter_count;
         out_info->duration_ms = cached->duration_ms;
         out_info->track_number = cached->track_number;
         snprintf(out_info->title, sizeof(out_info->title), "%s", cached->title);

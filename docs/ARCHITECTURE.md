@@ -293,7 +293,17 @@ launcher takes the screen (passcode stash, fb dump, status bar off) and only the
 have rotated it), re-grabs input and repaints with GC16.
 
 **Zero-cost controls.** KUAL items "Play / Pause", "Back 30 s", "Forward 30 s" write one
-line into a FIFO (`/var/tmp/aloud.ctl`) that aloud polls. Nothing runs while reading.
+line into a FIFO (`/var/tmp/aloud.ctl`) that aloud polls (`toggle`, `pause`, `back`,
+`fwd`, `prev`, `next`). Nothing runs while reading.
+
+**Inside the reader.** Amazon's reader can't be extended without writing to the system
+partition, which we never do. KOReader can: `extras/koreader/aloud.koplugin` (shipped in
+the zip under `extensions/aloud/koreader/`) adds those commands to KOReader's Tools menu
+and as Dispatcher actions for any gesture. It opens the FIFO write-only + non-blocking
+first (ENXIO/ENOENT = Aloud isn't listening: say so instead of hanging), then writes
+through an O_RDWR descriptor so the write can never raise SIGPIPE in KOReader, which
+doesn't ignore it. It then shows `/var/tmp/aloud.state` ("playing|paused, chapter,
+book"), which aloud rewrites in RAM only when it changes. No timers on either side.
 Rejected: listening to the touchscreen ungrabbed for a gesture (wakes on every tap,
 collides with the reader's own gestures) — exactly the lag the owner ruled out.
 
@@ -304,7 +314,9 @@ collides with the reader's own gestures) — exactly the lag the owner ruled out
 - A cable plugged in while in the background (powerd `charging`, the same signal KOReader
   uses) saves and exits: USB drive mode takes `/mnt/us` away from under the open book and
   our own binary, and two writers on the vfat would risk corruption. Wall chargers stop
-  background playback too; that is the price of never racing volumd.
+  background playback too; that is the price of never racing volumd. Exception: when
+  volumd is SIGSTOPped (KOReader does that while it runs) USB drive mode can't happen,
+  so we keep playing — reading in KOReader while charging works.
 - Paused in the background for 10 min (sleep timer, KUAL pause, BT gone) → save and exit,
   so a forgotten Aloud never holds memory or a Bluetooth stream.
 - The per-launch copy of the launcher (`/var/tmp/aloud-launcher-<pid>.sh`) means a second
@@ -331,8 +343,11 @@ libavformat from the start, seeks land as close or closer (tests/test_main.c).
 Scope is deliberately narrow — non-fragmented file, AAC (`mp4a`/`esds`, OTI 0x40/0x66-68),
 at most one non-empty edit. Anything else returns an error and the decoder silently uses
 libavformat (`ALOUD_NO_MP4LITE=1` forces that). Every size from the file is bounds-checked;
-4,000 mutated M4Bs ran clean under ASan/UBSan. `decoder_probe` (library scan, once per new
-or changed file, foreground only) still uses libavformat.
+4,000 mutated M4Bs ran clean under ASan/UBSan. `decoder_probe` (library scan) still uses
+libavformat, but only once per new or changed file: embedded chapters are cached in
+`state/chapters.tsv` (with a `# end` marker; a truncated file is ignored and the books
+re-probed). Before that, books with chapters were re-probed at every launch — measured on
+the PW5 as a 107 MB `VmHWM`; on the host the warm launch went from 118 MB to 28 MB.
 
 The resampler is now rebuilt whenever a decoded frame's rate/format/channels differ from
 what it was built for (HE-AAC reports its SBR rate only after the first frame).

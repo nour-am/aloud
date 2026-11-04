@@ -73,6 +73,9 @@ Top to bottom:
 - Opening Aloud again (KUAL "Open Aloud" or the Aloud scriptlet) returns to the player,
   live, instead of starting over.
 - KUAL "Play / Pause", "Back 30 s", "Forward 30 s" control it without opening it.
+- In KOReader, the bundled plugin adds Tools → Aloud audiobook (play / pause, ±30 s,
+  previous / next chapter) and the same actions for the Gesture manager; each tap shows
+  a short "Aloud: playing · Chapter 3" notification.
 - It stops by itself, saving the position, when a cable is plugged in or after 10 min
   paused.
 
