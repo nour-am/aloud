@@ -157,14 +157,36 @@ int platform_init(Platform **out, int sim_w, int sim_h, int sim_dpi) {
     return 0;
 }
 
-void platform_free(Platform *plat) {
+void platform_release_input(Platform *plat) {
     if (!plat) return;
     for (int i = 0; i < plat->dev_count; i++) {
         if (plat->devs[i].fd >= 0) {
             (void)ioctl(plat->devs[i].fd, EVIOCGRAB, 0);
             close(plat->devs[i].fd);
+            plat->devs[i].fd = -1;
         }
     }
+    plat->dev_count = 0;
+}
+
+int platform_take_display(Platform *plat) {
+    if (!plat) return -EINVAL;
+    platform_release_input(plat);
+    int old_w = plat->width, old_h = plat->height;
+    /* The stock UI may have rotated the framebuffer while we were in the background. */
+    if (fbink_reinit(plat->fbfd, &plat->fb_cfg) < 0) {
+        return -EIO;
+    }
+    fbink_get_state(&plat->fb_cfg, &plat->fb_state);
+    if (plat->fb_state.view_width > 0) plat->width = (int)plat->fb_state.view_width;
+    if (plat->fb_state.view_height > 0) plat->height = (int)plat->fb_state.view_height;
+    scan_kindle_inputs(plat);
+    return (plat->width != old_w || plat->height != old_h) ? 1 : 0;
+}
+
+void platform_free(Platform *plat) {
+    if (!plat) return;
+    platform_release_input(plat);
     if (plat->mtk_fast_mode_set) {
         (void)fbink_mtk_toggle_auto_reagl(plat->fbfd, true);
     }

@@ -109,6 +109,7 @@ typedef struct {
     int last_drawn_sleep_min;
     bool last_drawn_playing;
     bool quit_requested;
+    bool background_requested; /* "Play in background" tapped; main.c clears it */
 } Ui;
 
 int ui_init(Ui *ui, Canvas *canvas, TextSystem *text, Library *library,

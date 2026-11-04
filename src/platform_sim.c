@@ -285,6 +285,14 @@ int platform_refresh(Platform *plat, const Canvas *c, AloudRect r, AloudWaveform
     return 0;
 }
 
+void platform_release_input(Platform *plat) {
+    (void)plat;
+}
+
+int platform_take_display(Platform *plat) {
+    return plat ? 0 : -EINVAL;
+}
+
 int platform_get_input_fds(Platform *plat, int *fds_out, int max_fds) {
     (void)plat;
     (void)fds_out;

@@ -76,6 +76,7 @@ build/host/aloud-sim: $(CORE_SRCS) src/main.c build/host/sonic.o
 test: build/host/test_aloud
 	./tests/gen_fixtures.sh build/test-fixtures
 	./build/host/test_aloud build/test-fixtures third_party/fonts
+	sh tests/test_launcher.sh
 
 sim: build/host/aloud-sim
 	./tests/gen_fixtures.sh build/test-fixtures
@@ -145,6 +146,7 @@ package: kindle
 	cp build/kindle/aloud-sink-armhf build/pkg/extensions/aloud/bin/aloud-sink-armhf
 	cp tools/kindle-diagnose.sh build/pkg/extensions/aloud/bin/kindle-diagnose.sh
 	cp tools/kindle-audio-test.sh build/pkg/extensions/aloud/bin/kindle-audio-test.sh
+	cp tools/kindle-perf.sh build/pkg/extensions/aloud/bin/kindle-perf.sh
 	chmod +x build/pkg/extensions/aloud/bin/*
 	cp third_party/fonts/Literata-Regular.ttf \
 	   third_party/fonts/Literata-SemiBold.ttf \

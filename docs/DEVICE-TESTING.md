@@ -84,3 +84,33 @@ package (`documents/` or `extensions/aloud/bin/`):
 - [ ] **1-hour battery drain test:** Charge to 100%, play an audiobook over Bluetooth for
   60 minutes with the screensaver active, and record battery % drop vs. 60 minutes of the
   stock Audible player.
+
+---
+
+## Phase 5: Background playback & big books (ARCHITECTURE.md D13, D14)
+
+Install the new build, open a long M4B in Aloud, play it, then:
+
+- [ ] **Hand-off:** tap **Play in background**. The Kindle screen you launched from comes
+  back (status bar visible), audio keeps playing without a gap.
+- [ ] **Reading while listening:** open a book in the stock reader and turn ~30 pages,
+  open the dictionary once, change font size once. Page turns must feel exactly as fast as
+  with Aloud closed; audio must not stutter.
+- [ ] **Measure:** KUAL → Aloud → **Measure Performance** (takes ~1 min, keeps playing).
+  Read `aloud-perf.txt` on the USB root. Expected: `mode: background`, `aloud` CPU a few %
+  at most, `VmHWM` well under 30 MB, audio thread `nice 5`; the benchmark's
+  `peak=` well under 30 MB even for an 8 h+ M4B.
+- [ ] **KUAL controls:** Play / Pause pauses and resumes within a second; Back/Forward
+  30 s jump audibly. With Aloud closed, Back/Forward do nothing and Play/Pause opens Aloud.
+- [ ] **Back to Aloud:** KUAL → Open Aloud shows the live player (no second instance:
+  `aloud.log` has no new `aloud: launch` line). Repeat background ↔ foreground 5×.
+- [ ] **Rotation:** in background, rotate the reader to landscape, then open Aloud: the
+  player is laid out for landscape and taps land where they should.
+- [ ] **Screensaver & passcode:** with a passcode set, press power while in background.
+  Audio keeps playing; waking shows the normal lock screen; the passcode works.
+- [ ] **Sleep timer in background:** set 5 min, go to background, read. Audio fades and
+  stops; ~10 min later `aloud.log` shows `paused in background ... exiting`.
+- [ ] **Cable:** while playing in background, plug into a computer. Audio stops,
+  `aloud.log` shows `cable plugged in`, USB drive mode works and the position is saved.
+- [ ] **Exit from background leaves the screen alone:** after the cable test, unplug: the
+  book you were reading is still on screen (not Aloud's launch-time screenshot).

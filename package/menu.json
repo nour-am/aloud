@@ -5,15 +5,39 @@
             "priority": 1,
             "items": [
                 {
-                    "name": "Start Aloud",
+                    "name": "Open Aloud",
                     "priority": 1,
                     "action": "/mnt/us/extensions/aloud/aloud.sh",
                     "exitmenu": true,
-                    "internal": "status Launching Aloud..."
+                    "internal": "status Opening Aloud..."
+                },
+                {
+                    "name": "Play / Pause (background)",
+                    "priority": 2,
+                    "action": "/mnt/us/extensions/aloud/aloud.sh",
+                    "params": "--ctl toggle",
+                    "exitmenu": true,
+                    "internal": "status Play / Pause"
+                },
+                {
+                    "name": "Back 30 s (background)",
+                    "priority": 3,
+                    "action": "/mnt/us/extensions/aloud/aloud.sh",
+                    "params": "--ctl back",
+                    "exitmenu": false,
+                    "internal": "status Back 30 s"
+                },
+                {
+                    "name": "Forward 30 s (background)",
+                    "priority": 4,
+                    "action": "/mnt/us/extensions/aloud/aloud.sh",
+                    "params": "--ctl fwd",
+                    "exitmenu": false,
+                    "internal": "status Forward 30 s"
                 },
                 {
                     "name": "Choose Audiobook Folder...",
-                    "priority": 2,
+                    "priority": 5,
                     "action": "/mnt/us/extensions/aloud/aloud.sh",
                     "params": "--choose-folder",
                     "exitmenu": true,
@@ -21,15 +45,22 @@
                 },
                 {
                     "name": "Test Audio & Sleep (10s 440Hz tone)",
-                    "priority": 3,
+                    "priority": 6,
                     "action": "/mnt/us/extensions/aloud/bin/aloud",
                     "params": "--tone-test 10 --helpers /mnt/us/extensions/aloud/bin",
                     "exitmenu": false,
                     "internal": "status Playing 10s test tone..."
                 },
                 {
+                    "name": "Measure Performance (aloud-perf.txt, ~1 min)",
+                    "priority": 7,
+                    "action": "/mnt/us/extensions/aloud/bin/kindle-perf.sh",
+                    "exitmenu": false,
+                    "internal": "status Measuring for about a minute..."
+                },
+                {
                     "name": "Save Device Diagnostics (aloud-diagnose.txt)",
-                    "priority": 4,
+                    "priority": 8,
                     "action": "/mnt/us/extensions/aloud/bin/kindle-diagnose.sh",
                     "exitmenu": false,
                     "internal": "status Writing aloud-diagnose.txt to USB root..."

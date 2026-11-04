@@ -12,13 +12,15 @@ typedef enum {
     POWER_EVT_OUT_OF_SCREENSAVER,
     POWER_EVT_READY_TO_SUSPEND,
     POWER_EVT_WAKEUP_FROM_SUSPEND,
-    POWER_EVT_SUSPENDING
+    POWER_EVT_SUSPENDING,
+    POWER_EVT_CHARGING /* a cable was plugged in (USB drive mode may follow) */
 } PowerEventType;
 
 typedef struct {
     pid_t wait_pid;
     int event_fd;
     bool in_screensaver;
+    bool charging_event; /* set on POWER_EVT_CHARGING; the caller clears it */
     bool prevent_screensaver_fallback;
     bool prevent_screensaver_active;
     char line_buf[512];

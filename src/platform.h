@@ -117,6 +117,15 @@ int platform_get_input_fds(Platform *plat, int *fds_out, int max_fds);
 /* Read pending input events from any ready input fd. Returns true if an event was produced. */
 bool platform_poll_event(Platform *plat, AloudInputEvent *out_ev);
 
+/* Background playback (ARCHITECTURE.md D13): close every input device so the stock
+ * reader gets all touches and none of them wake Aloud. */
+void platform_release_input(Platform *plat);
+
+/* Coming back to the foreground: re-read the framebuffer state (the reader may have
+ * rotated it meanwhile) and grab input again. Returns 1 if the view size changed, 0 if
+ * not, negative on error. */
+int platform_take_display(Platform *plat);
+
 /* Write the current canvas to a grayscale PNG file (used by simulator and golden tests). */
 int platform_write_png(const Canvas *c, const char *png_path);
 

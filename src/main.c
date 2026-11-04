@@ -28,13 +28,90 @@
 static volatile sig_atomic_t g_quit_signal = 0;
 static int g_sig_pipe[2] = {-1, -1};
 
+#define SIG_BYTE_QUIT 1
+#define SIG_BYTE_FOREGROUND 2
+
+/* SIGUSR2 = the launcher has given the screen back to us (D13); anything else = quit. */
 static void on_signal(int sig) {
-    (void)sig;
-    g_quit_signal = 1;
+    uint8_t b = SIG_BYTE_QUIT;
+    if (sig == SIGUSR2) {
+        b = SIG_BYTE_FOREGROUND;
+    } else {
+        g_quit_signal = 1;
+    }
     if (g_sig_pipe[1] >= 0) {
-        uint8_t b = 1;
         (void)write(g_sig_pipe[1], &b, 1);
     }
+}
+
+/* Background playback that stays paused this long exits, so a forgotten Aloud never
+ * keeps memory or a Bluetooth stream around while the user reads (D13). */
+#define BG_IDLE_EXIT_MS (10 * 60 * 1000)
+
+/* Control FIFO for KUAL menu buttons ("toggle", "back", "fwd") while in the background.
+ * A second, write-only descriptor of our own keeps poll() from seeing EOF (and spinning)
+ * after each writer closes. */
+typedef struct {
+    char path[256];
+    int rfd;
+    int wfd;
+    char buf[64];
+    size_t len;
+} Control;
+
+static void control_open(Control *c, const char *path) {
+    memset(c, 0, sizeof(*c));
+    c->rfd = -1;
+    c->wfd = -1;
+    if (!path || !path[0]) return;
+    snprintf(c->path, sizeof(c->path), "%s", path);
+    (void)unlink(c->path);
+    if (mkfifo(c->path, 0600) != 0) {
+        fprintf(stderr, "aloud: control fifo %s: %s\n", c->path, strerror(errno));
+        return;
+    }
+    c->rfd = open(c->path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (c->rfd >= 0) c->wfd = open(c->path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+}
+
+static void control_close(Control *c) {
+    if (c->rfd >= 0) close(c->rfd);
+    if (c->wfd >= 0) close(c->wfd);
+    if (c->path[0]) (void)unlink(c->path);
+    c->rfd = c->wfd = -1;
+}
+
+/* Apply every complete command line waiting in the FIFO. Returns true if any ran. */
+static bool control_handle(Control *c, Player *player) {
+    bool any = false;
+    for (;;) {
+        ssize_t n = read(c->rfd, c->buf + c->len, sizeof(c->buf) - 1 - c->len);
+        if (n <= 0) break;
+        c->len += (size_t)n;
+        c->buf[c->len] = '\0';
+        char *nl;
+        while ((nl = strchr(c->buf, '\n')) != NULL) {
+            *nl = '\0';
+            if (strcmp(c->buf, "toggle") == 0) {
+                player_toggle_play(player);
+                any = true;
+            } else if (strcmp(c->buf, "pause") == 0) {
+                player_pause(player);
+                any = true;
+            } else if (strcmp(c->buf, "back") == 0) {
+                player_seek_relative_ms(player, -30000);
+                any = true;
+            } else if (strcmp(c->buf, "fwd") == 0) {
+                player_seek_relative_ms(player, 30000);
+                any = true;
+            }
+            size_t rem = c->len - (size_t)(nl - c->buf + 1);
+            memmove(c->buf, nl + 1, rem + 1);
+            c->len = rem;
+        }
+        if (c->len >= sizeof(c->buf) - 1) c->len = 0; /* garbage: drop it */
+    }
+    return any;
 }
 
 static int64_t monotonic_ms(void) {
@@ -488,6 +565,8 @@ int main(int argc, char **argv) {
     int bench_seconds = 120;
     int tone_seconds = 10;
     float top_inset_mm = 0.0f;
+    pid_t launcher_pid = 0;
+    const char *control_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--library") == 0 && i + 1 < argc) {
@@ -504,6 +583,12 @@ int main(int argc, char **argv) {
              * be hidden, so its clock/battery redraws never land on our headers. */
             top_inset_mm = strtof(argv[++i], NULL);
             if (!(top_inset_mm >= 0.0f && top_inset_mm <= 20.0f)) top_inset_mm = 0.0f;
+        } else if (strcmp(argv[i], "--launcher-pid") == 0 && i + 1 < argc) {
+            /* The launcher restores the Kindle UI when we go to the background (D13). */
+            long v = strtol(argv[++i], NULL, 10);
+            launcher_pid = (v > 1) ? (pid_t)v : 0;
+        } else if (strcmp(argv[i], "--control") == 0 && i + 1 < argc) {
+            control_path = argv[++i];
         } else if (strcmp(argv[i], "--helpers") == 0 && i + 1 < argc) {
             helper_dir = argv[++i];
         } else if (strcmp(argv[i], "--export-screens") == 0 && i + 1 < argc) {
@@ -536,6 +621,8 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+    signal(SIGUSR1, SIG_IGN); /* reserved for us -> launcher; never fatal to us */
     signal(SIGPIPE, SIG_IGN);
 
     if (bench_file) {
@@ -640,7 +727,14 @@ int main(int argc, char **argv) {
     int64_t last_loop_ms = monotonic_ms();
     bool has_been_playing = false;
 
-    /* Main poll() event loop: zero wakeups when paused and idle (D7). */
+    /* Background playback (D13): the stock UI owns screen and input, we only play. */
+    bool in_bg = false;
+    int64_t bg_paused_since = -1;
+    Control ctl;
+    control_open(&ctl, control_path);
+
+    /* Main poll() event loop: zero wakeups when paused and idle (D7), and none while
+     * playing in the background either (the audio thread autosaves on its own). */
     while (!g_quit_signal && !ui.quit_requested) {
         struct pollfd pfds[16];
         int nfds = 0;
@@ -670,6 +764,12 @@ int main(int argc, char **argv) {
             pfds[nfds++] = (struct pollfd){.fd = g_sig_pipe[0], .events = POLLIN};
         }
 
+        int ctl_slot = -1;
+        if (ctl.rfd >= 0) {
+            ctl_slot = nfds;
+            pfds[nfds++] = (struct pollfd){.fd = ctl.rfd, .events = POLLIN};
+        }
+
         PlayerSnapshot snap;
         player_get_snapshot(player, &snap);
         power_on_playback_changed(&power, snap.playing);
@@ -678,18 +778,33 @@ int main(int argc, char **argv) {
         }
 
         /* Compute poll timeout:
-         * - While playing: wake every 1 second (1,000 ms) so progress indicator stays synced.
+         * - While playing in the foreground: wake every 1 s so the progress stays synced.
          * - Just paused while audio helper may still be open: wake once after 2 min to close it.
-         * - Otherwise paused & idle: timeout = -1 (infinite, zero CPU wakeups per D7). */
+         * - Paused in the background: also wake to exit after BG_IDLE_EXIT_MS.
+         * - Otherwise: timeout = -1 (infinite, zero CPU wakeups per D7). */
+        int64_t now_ms = monotonic_ms();
         int timeout_ms = -1;
         if (snap.playing) {
-            timeout_ms = 1000;
-        } else if (has_been_playing) {
-            timeout_ms = PLAYER_IDLE_SINK_CLOSE_MS;
+            bg_paused_since = -1;
+            timeout_ms = in_bg ? -1 : 1000;
+        } else {
+            if (has_been_playing) {
+                timeout_ms = PLAYER_IDLE_SINK_CLOSE_MS;
+            }
+            if (in_bg) {
+                if (bg_paused_since < 0) bg_paused_since = now_ms;
+                int64_t left = BG_IDLE_EXIT_MS - (now_ms - bg_paused_since);
+                if (left <= 0) {
+                    printf("aloud: paused in background for %d min, exiting\n",
+                           BG_IDLE_EXIT_MS / 60000);
+                    break;
+                }
+                if (timeout_ms < 0 || left < timeout_ms) timeout_ms = (int)left;
+            }
         }
 
         int pr = poll(pfds, (nfds_t)nfds, timeout_ms);
-        int64_t now_ms = monotonic_ms();
+        now_ms = monotonic_ms();
         int64_t elapsed_ms = now_ms - last_loop_ms;
         last_loop_ms = now_ms;
 
@@ -706,8 +821,60 @@ int main(int argc, char **argv) {
 
         player_housekeeping_tick(player, elapsed_ms);
 
+        bool want_foreground = false;
         if (sig_slot >= 0 && (pfds[sig_slot].revents & POLLIN)) {
-            break;
+            uint8_t bytes[16];
+            ssize_t n = read(g_sig_pipe[0], bytes, sizeof(bytes));
+            bool quit = false;
+            for (ssize_t i = 0; i < n; i++) {
+                if (bytes[i] == SIG_BYTE_FOREGROUND) want_foreground = true;
+                else quit = true;
+            }
+            if (quit || g_quit_signal) break;
+        }
+
+        if (want_foreground && in_bg) {
+            /* The launcher has hidden the status bar and saved the Kindle's screen. */
+            int changed = platform_take_display(plat);
+            if (changed < 0) {
+                fprintf(stderr, "aloud: cannot take the display back, exiting\n");
+                break;
+            }
+            if (changed == 1) {
+                /* The reader rotated the screen while we were away: re-layout. */
+                canvas_free(&canvas);
+                if (canvas_init(&canvas, platform_width(plat), platform_height(plat),
+                                platform_dpi(plat)) < 0) {
+                    fprintf(stderr, "aloud: out of memory re-creating the canvas\n");
+                    break;
+                }
+                canvas_clear(&canvas, TONE_WHITE);
+                inset_px = canvas_mm_to_px(&canvas, top_inset_mm);
+                if (inset_px < 0 || inset_px > canvas.height / 8) inset_px = 0;
+                view = canvas;
+                view.pixels = canvas.pixels + (size_t)inset_px * (size_t)canvas.width;
+                view.height = canvas.height - inset_px;
+                ui.cached_player_book = NULL;
+            }
+            in_bg = false;
+            bg_paused_since = -1;
+            player_set_background(player, false);
+            printf("aloud: foreground\n");
+            fflush(stdout);
+            AloudRect r;
+            AloudWaveform w;
+            ui_render_full(&ui, true, &r, &w);
+            present(plat, &canvas, &view, inset_px, r, ALOUD_WFM_GC16_FLASH);
+            continue;
+        }
+
+        if (ctl_slot >= 0 && (pfds[ctl_slot].revents & POLLIN)) {
+            if (control_handle(&ctl, player) && !in_bg && !power.in_screensaver) {
+                AloudRect r;
+                AloudWaveform w;
+                ui_render_full(&ui, false, &r, &w);
+                present(plat, &canvas, &view, inset_px, r, w);
+            }
         }
 
         if (power_slot >= 0 && (pfds[power_slot].revents & (POLLIN | POLLHUP))) {
@@ -720,7 +887,17 @@ int main(int argc, char **argv) {
                  * (battery dies, reboot), so persist now rather than at the next 60 s tick. */
                 (void)player_save_position_now(player);
             }
-            if (wake_repaint && !power.in_screensaver) {
+            if (power.charging_event) {
+                power.charging_event = false;
+                if (in_bg) {
+                    /* A cable may mean USB drive mode, which takes /mnt/us away from under
+                     * our open book and our own binary. Let go of it completely (D13). */
+                    printf("aloud: cable plugged in, stopping background playback\n");
+                    player_pause(player);
+                    break;
+                }
+            }
+            if (wake_repaint && !power.in_screensaver && !in_bg) {
                 AloudRect r;
                 AloudWaveform w;
                 ui_render_full(&ui, true, &r, &w);
@@ -732,7 +909,7 @@ int main(int argc, char **argv) {
         if (notify_fired) {
             player_clear_notify(player);
         }
-        if ((notify_fired || (pr == 0 && snap.playing)) && !power.in_screensaver) {
+        if ((notify_fired || (pr == 0 && snap.playing)) && !power.in_screensaver && !in_bg) {
             AloudRect r;
             AloudWaveform w;
             if (ui_on_player_tick(&ui, &r, &w)) {
@@ -741,7 +918,7 @@ int main(int argc, char **argv) {
         }
 
         AloudInputEvent ev;
-        while (platform_poll_event(plat, &ev)) {
+        while (!in_bg && platform_poll_event(plat, &ev)) {
             ev.y -= inset_px;
             ev.start_y -= inset_px;
             if (ev.type == ALOUD_EV_TAP && ev.y < 0) {
@@ -753,8 +930,24 @@ int main(int argc, char **argv) {
                 present(plat, &canvas, &view, inset_px, r, w);
             }
             if (ui.quit_requested) break;
+            if (ui.background_requested) {
+                ui.background_requested = false;
+                /* Release everything the stock UI needs before asking the launcher to
+                 * restore it; from here on we never touch the framebuffer. */
+                (void)player_save_position_now(player);
+                platform_release_input(plat);
+                player_set_background(player, true);
+                in_bg = true;
+                bg_paused_since = -1;
+                printf("aloud: background\n");
+                fflush(stdout);
+                if (launcher_pid > 0) (void)kill(launcher_pid, SIGUSR1);
+                break;
+            }
         }
     }
+
+    control_close(&ctl);
 
     /* Always persist the current position before exiting (D8, D9). */
     (void)player_save_position_now(player);

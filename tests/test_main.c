@@ -13,6 +13,7 @@
 #include "../src/ui.h"
 
 #include <inttypes.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -251,6 +252,22 @@ static void test_library_and_player_engine(const char *fixture_dir) {
     player_get_snapshot(p, &snap);
     CHECK(snap.file_index >= 1, "advanced seamlessly from file 0 to file 1");
 
+    /* Background playback (D13): no per-second wakeups of the main thread. */
+    {
+        int nfd = player_notify_fd(p);
+        CHECK(player_seek_book_ms(p, lib.books[0].chapters[1].start_book_ms + 200) == 0, "seek into ch 2");
+        (void)player_step_frames_sync(p, 2048);
+        player_clear_notify(p);
+        player_set_background(p, true);
+        for (int i = 0; i < 43; i++) (void)player_step_frames_sync(p, 2048); /* ~2 s */
+        struct pollfd pf = {.fd = nfd, .events = POLLIN};
+        CHECK(poll(&pf, 1, 0) == 0, "background: 2 s of playback wakes nobody");
+        player_set_background(p, false);
+        for (int i = 0; i < 43; i++) (void)player_step_frames_sync(p, 2048);
+        CHECK(poll(&pf, 1, 0) == 1, "foreground: per-second progress notifications resume");
+        player_clear_notify(p);
+    }
+
     /* Test Previous Chapter 3-second rule (DESIGN.md). */
     CHECK(player_seek_book_ms(p, lib.books[0].chapters[1].start_book_ms + 3500) == 0, "seek 3.5s into ch 2");
     CHECK(player_prev_chapter(p) == 0, "prev_chapter >3s restarts current chapter");
@@ -324,6 +341,8 @@ static void test_power_and_touch_decoders(void) {
     CHECK(power_parse_event_line("com.lab126.powerd goingToScreenSaver 2") == POWER_EVT_GOING_TO_SCREENSAVER, "parse screensaver");
     CHECK(power_parse_event_line("com.lab126.powerd outOfScreenSaver 1") == POWER_EVT_OUT_OF_SCREENSAVER, "parse wake");
     CHECK(power_parse_event_line("com.lab126.powerd readyToSuspend 10") == POWER_EVT_READY_TO_SUSPEND, "parse readyToSuspend");
+    CHECK(power_parse_event_line("com.lab126.powerd charging") == POWER_EVT_CHARGING, "parse charging (cable in)");
+    CHECK(power_parse_event_line("com.lab126.powerd notCharging") == POWER_EVT_NONE, "notCharging is not a plug-in");
     CHECK(power_compute_defer_seconds(false, 0) == 0, "paused -> never defer suspend");
     CHECK(power_compute_defer_seconds(true, 0) == 3600, "playing -> defer 3600s");
     CHECK(power_compute_defer_seconds(true, 300000) == 360, "playing with 5m sleep -> defer 360s");
@@ -437,6 +456,23 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     };
     CHECK(ui_handle_event(&ui, tap_row, &rect, &wfm), "tap row 0 handled");
     CHECK(ui.screen == UI_SCREEN_PLAYER, "navigated to Player screen");
+
+    /* "Play in background" sits between Library and Chapters without overlapping them,
+     * and only raises a flag for main.c (no redraw: the screen is being handed back). */
+    CHECK(ui.hit_header_center.w >= canvas_mm_to_px(&canvas, 9.0f), "background button drawn");
+    CHECK(ui.hit_header_left.x + ui.hit_header_left.w <= ui.hit_header_center.x &&
+          ui.hit_header_center.x + ui.hit_header_center.w <= ui.hit_header_right.x,
+          "header hit boxes don't overlap");
+    {
+        AloudInputEvent tap_bg = {
+            .type = ALOUD_EV_TAP,
+            .x = ui.hit_header_center.x + ui.hit_header_center.w / 2,
+            .y = ui.hit_header_center.y + ui.hit_header_center.h / 2
+        };
+        CHECK(!ui_handle_event(&ui, tap_bg, &rect, &wfm) && ui.background_requested &&
+              ui.screen == UI_SCREEN_PLAYER, "background tap requests background, no redraw");
+        ui.background_requested = false;
+    }
     {
         PlayerSnapshot chosen;
         player_get_snapshot(player, &chosen);

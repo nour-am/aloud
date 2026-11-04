@@ -986,21 +986,48 @@ static void render_player_screen(Ui *ui) {
     int chev_sz = canvas_mm_to_px(c, 4.0f);
     int nav_w = canvas_mm_to_px(c, 28.0f);
 
-    ui->hit_header_left = (AloudRect){margin, 0, nav_w, header_h};
+    int gap = canvas_mm_to_px(c, 2.0f);
+    int lib_lbl_w = text_measure_width(ui->text, FONT_SANS_BOLD, nav_px, "Library", 0);
+    int left_end = margin + chev_sz + canvas_mm_to_px(c, 1.2f) + lib_lbl_w + gap;
+    if (left_end > margin + nav_w) left_end = margin + nav_w;
+    ui->hit_header_left = (AloudRect){margin, 0, left_end - margin, header_h};
     icon_draw(c, ICON_CHEVRON_LEFT, margin, (header_h - chev_sz) / 2, chev_sz, TONE_BLACK);
     text_draw_line(ui->text, c, FONT_SANS_BOLD, nav_px,
                    margin + chev_sz + canvas_mm_to_px(c, 1.2f),
                    (header_h - nav_lh) / 2, nav_w - chev_sz,
                    "Library", TONE_BLACK, TEXT_ALIGN_LEFT);
 
-    ui->hit_header_right = (AloudRect){c->width - margin - nav_w, 0, nav_w, header_h};
     int chap_lbl_w = text_measure_width(ui->text, FONT_SANS_BOLD, nav_px, "Chapters", 0);
     int chap_x = c->width - margin - chev_sz - canvas_mm_to_px(c, 1.2f) - chap_lbl_w;
+    int right_start = chap_x - gap;
+    if (right_start < c->width - margin - nav_w) right_start = c->width - margin - nav_w;
+    ui->hit_header_right = (AloudRect){right_start, 0, c->width - margin - right_start, header_h};
     text_draw_line(ui->text, c, FONT_SANS_BOLD, nav_px,
                    chap_x, (header_h - nav_lh) / 2, chap_lbl_w + 6,
                    "Chapters", TONE_BLACK, TEXT_ALIGN_LEFT);
     icon_draw(c, ICON_CHEVRON_RIGHT, c->width - margin - chev_sz,
               (header_h - chev_sz) / 2, chev_sz, TONE_BLACK);
+
+    /* Centre: hand the screen back to the Kindle and keep listening (D13). The longest
+     * label that fits wins; on a panel too narrow for either the button is omitted. */
+    static const char *const bg_labels[] = {"Play in background", "Background"};
+    int bg_px = canvas_mm_to_px(c, 2.8f);
+    int bg_pad = canvas_mm_to_px(c, 3.0f);
+    int bg_avail = right_start - left_end - gap * 2;
+    for (size_t li = 0; li < sizeof(bg_labels) / sizeof(bg_labels[0]); li++) {
+        int tw = text_measure_width(ui->text, FONT_SANS_BOLD, bg_px, bg_labels[li], 0);
+        int bw = tw + bg_pad * 2;
+        if (bw > bg_avail || bw < canvas_mm_to_px(c, 9.0f)) continue;
+        int bh = canvas_mm_to_px(c, 7.8f);
+        int bx = left_end + gap + (bg_avail - bw) / 2;
+        int by = (header_h - bh) / 2;
+        int bg_lh = text_line_height(ui->text, FONT_SANS_BOLD, bg_px);
+        ui->hit_header_center = (AloudRect){bx, 0, bw, header_h};
+        canvas_stroke_round_rect(c, bx, by, bw, bh, canvas_mm_to_px(c, 1.4f), rule_px, TONE_BLACK);
+        text_draw_line(ui->text, c, FONT_SANS_BOLD, bg_px, bx + bg_pad, by + (bh - bg_lh) / 2,
+                       tw + 4, bg_labels[li], TONE_BLACK, TEXT_ALIGN_LEFT);
+        break;
+    }
 
     canvas_hline(c, margin, header_h - rule_px, c->width - margin * 2, rule_px, TONE_RULE_GRAY);
 
@@ -1680,6 +1707,11 @@ bool ui_handle_event(Ui *ui, AloudInputEvent ev, AloudRect *out_rect, AloudWavef
             ui->lib_page = 0;
             ui_render_full(ui, false, out_rect, out_wfm);
             return true;
+        }
+        if (canvas_rect_contains(ui->hit_header_center, tx, ty)) {
+            /* main.c releases the screen and input; nothing to redraw here. */
+            ui->background_requested = true;
+            return false;
         }
         if (canvas_rect_contains(ui->hit_header_right, tx, ty)) {
             PlayerSnapshot snap;

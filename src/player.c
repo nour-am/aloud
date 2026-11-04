@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* setpriority() */
 #include "player.h"
 
 #include "sonic.h"
@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -18,6 +19,11 @@ struct Player {
     pthread_t thread;
     bool thread_running;
     bool quit_requested;
+
+    /* Background playback (D13): no per-second UI wakeups, bigger write slices, and a
+     * lower CPU priority so the stock reader always wins the single core. */
+    bool background;
+    bool thread_niced;
 
     int notify_pipe[2];
 
@@ -385,9 +391,10 @@ static int step_frames_locked(Player *p, int max_out_frames) {
         save_position_locked(p);
     }
 
-    /* Notify UI every 1 second when the displayed second changes. */
+    /* Notify UI every 1 second when the displayed second changes (nobody is looking in
+     * the background, so don't wake the main thread for it). */
     int cur_sec = (int)(p->book_pos_ms / 1000);
-    if (cur_sec != p->last_notified_second) {
+    if (cur_sec != p->last_notified_second && !p->background) {
         p->last_notified_second = cur_sec;
         notify_main_locked(p);
     }
@@ -418,9 +425,18 @@ static void *audio_thread_main(void *arg) {
             pthread_cond_wait(&p->cv, &p->mu);
             continue;
         }
+        if (p->thread_niced != p->background) {
+            /* Linux nice is per thread; the helper we spawn from here inherits it. +5
+             * still leaves this thread ~25% of the core under full contention, many
+             * times what decoding needs, and the mixer buffers seconds besides. */
+            p->thread_niced = p->background;
+            (void)setpriority(PRIO_PROCESS, 0, p->background ? 5 : 0);
+        }
         /* Step 512 frames (~11.6 ms) per slice so pause/seek commands on the UI
-         * thread take effect almost instantaneously without waiting on a big chunk. */
-        (void)step_frames_locked(p, 512);
+         * thread take effect almost instantaneously without waiting on a big chunk.
+         * In the background nobody is watching: 2048 frames (~46 ms) quarters the
+         * number of wakeups and syscalls. */
+        (void)step_frames_locked(p, p->background ? PLAYER_CHUNK_FRAMES : 512);
     }
     pthread_mutex_unlock(&p->mu);
     return NULL;
@@ -823,6 +839,14 @@ int player_set_sleep_timer(Player *p, int sleep_mode) {
     }
     pthread_mutex_unlock(&p->mu);
     return 0;
+}
+
+void player_set_background(Player *p, bool background) {
+    if (!p) return;
+    pthread_mutex_lock(&p->mu);
+    p->background = background;
+    p->last_notified_second = -1;
+    pthread_mutex_unlock(&p->mu);
 }
 
 void player_housekeeping_tick(Player *p, int64_t elapsed_wall_ms) {

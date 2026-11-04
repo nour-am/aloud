@@ -51,7 +51,7 @@ Done:
   - `src/platform_kindle.c`, `src/platform_sim.c`, `src/main.c`: FBInk + evdev (`EVIOCGRAB`,
     Protocol A & B, KT4 `BTN_TOUCH 0` quirk, axis swap, rotation map, Oasis/Voyage page keys) +
     `poll()` loop (`-1` timeout when paused & idle).
-- 191-check unit & integration test suite (`make test`) + golden screenshot generator
+- 215-check unit & integration test suite + launcher hand-off test (`make test`) + golden screenshot generator
   (`make sim` → `docs/screens/*.png`).
 - Crash-safe Kindle launcher & packaging (`make package` → `dist/aloud-0.1.0.zip`, 1.8 MB) +
   on-device diagnostic & audio smoke-test scripts (`tools/kindle-diagnose.sh`,
@@ -61,6 +61,15 @@ Owner feedback round 1 (stacked local branches, one per item, all tests green):
 `fix/progress-1s-sync` (#1) → `fix/immediate-pause` (#2) → `fix/fast-scrubber-seek` (#3) →
 `fix/playback-start-glitch` (#4) → `fix/status-bar-overlap` (#5) → `fix/position-autosave` (#6).
 Items #3–#6 need confirming on the device (see `docs/DEVICE-TESTING.md`).
+
+Background playback (`feat/background-playback`, 2026-11-03, owner's PW5 on FW 5.19.2):
+- "Play in background" keeps listening while reading in the stock reader; launcher-owned
+  UI hand-off via SIGUSR1/SIGUSR2, zero-cost KUAL Play/Pause/±30 s via a FIFO, exits on
+  cable plug-in or 10 min paused (ARCHITECTURE.md D13).
+- `src/mp4lite.c`: M4B/MP4 audio without libavformat's per-frame index — the owner's
+  8.6 h book went from 113 MB to 4.7 MB peak (D14). `aloud --bench <file>` and KUAL
+  "Measure Performance" (`tools/kindle-perf.sh`) measure it on the device.
+- Needs DEVICE-TESTING.md Phase 5 on the Kindle.
 
 Next step (requires physical Kindle hardware):
 - Run through `docs/DEVICE-TESTING.md` on the owner's Kindle(s) and record findings from
@@ -84,9 +93,10 @@ tools/arm-cc            zig cc wrapper: arm-linux-musleabihf, cortex_a8
 tools/arm-ar, tools/arm-ranlib
 tools/kindle-diagnose.sh   read-only on-device fact finder (scriptlet)
 tools/kindle-audio-test.sh standalone 10 s 440 Hz tone smoke-test scriptlet
+tools/kindle-perf.sh       on-device CPU/RAM snapshot + decode benchmark (aloud-perf.txt)
 helper/aloud_sink.c     dynamic glibc helper: dlopen libgstreamer-1.0/0.10, fdsrc ! mixersink
 src/                    C11 application modules (store, decoder, library, player, power, ui, platform)
-tests/                  gen_fixtures.sh + test_main.c (191 checks)
+tests/                  gen_fixtures.sh + test_main.c (C checks) + test_launcher.sh
 package/                launcher.sh, scriptlet.sh, config.xml, menu.json, audiobooks-README.txt
 third_party/ build/ dist/  git-ignored, generated
 ```
@@ -98,7 +108,7 @@ brew install zig            # 0.17.0 verified; Homebrew ffmpeg is used for test 
 ./scripts/fetch-deps.sh     # FBInk, sonic, stb, FFmpeg 9.0.2, Literata 3.103, Inter 4.1
 ./scripts/build-ffmpeg.sh host     # → build/host/ffmpeg/{include,lib}
 ./scripts/build-ffmpeg.sh kindle   # → build/kindle/ffmpeg/{include,lib}  (~3 min)
-make test                   # runs 191 unit & integration checks
+make test                   # runs the C checks and the launcher hand-off test
 make sim                    # exports screenshots into docs/screens/
 make package                # builds Kindle binaries and creates dist/aloud-0.1.0.zip
 ```

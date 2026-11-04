@@ -50,7 +50,9 @@ Ranked priorities (from the project owner):
 
 ### Player (Now Playing)
 Top to bottom:
-- Top bar: **‹ Library** left, **Chapters** right.
+- Top bar: **‹ Library** left, **Play in background** (outlined button) centre,
+  **Chapters** right. The centre label shortens to "Background" or is omitted on panels
+  too narrow for it.
 - Cover art, centred, ≈ 55 % of screen width (placeholder: title set in the serif on a
   hairline frame when the book has no art).
 - Title (serif) and author (sans, ink-gray), centred.
@@ -64,6 +66,15 @@ Top to bottom:
   before; otherwise restarts the current one (standard player behaviour).
 - Bottom row: **Speed 1.0×** · **Sleep Off** · volume − / + (only shown when volume is
   controllable on this device — see RESEARCH.md).
+
+### Background playback (ARCHITECTURE.md D13)
+- **Play in background** hands the screen back to the Kindle exactly as it was (book,
+  home, KUAL) and keeps playing. Nothing of Aloud is drawn while in the background.
+- Opening Aloud again (KUAL "Open Aloud" or the Aloud scriptlet) returns to the player,
+  live, instead of starting over.
+- KUAL "Play / Pause", "Back 30 s", "Forward 30 s" control it without opening it.
+- It stops by itself, saving the position, when a cable is plugged in or after 10 min
+  paused.
 
 ### Chapters
 - Paginated list: chapter title, duration right-aligned. Current chapter in bold with a

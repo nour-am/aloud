@@ -267,3 +267,72 @@ by saving state and exiting cleanly.
 - **On-device checklist** (`docs/DEVICE-TESTING.md`, to be written) for what only real
   hardware can verify: audio path per model, refresh quality, suspend behaviour, battery
   drain per hour.
+
+## D13. Background playback: keep listening while reading in the stock reader
+
+**Goal (owner, 2026-11-03):** listen while reading, without making the Kindle lag and
+without any way to leave it in a broken state. Controls while reading are allowed only if
+they cost nothing.
+
+**Mechanism.** "Play in background" in the player's top bar. The process stays alive but:
+- **closes** its evdev devices (not just un-`EVIOCGRAB`s them: an open but ungrabbed fd
+  would wake us on every page-turn tap) and never touches the framebuffer;
+- tells the launcher with `SIGUSR1`; the launcher, which owns every Kindle-UI change,
+  restores the passcode flag, status bar and the saved screen exactly as on exit;
+- tells the audio thread (`player_set_background`): no per-second notifications (the main
+  loop then has **no timers at all** while playing; the audio thread autosaves itself),
+  2048-frame write slices instead of 512 (4× fewer wakeups/syscalls), and `nice +5` on the
+  audio thread (per-thread on Linux; the helper spawned from it inherits it). Under full
+  contention +5 still leaves ~25 % of the core, many times what decoding needs, and the
+  mixer buffers seconds, so the reader always wins without audio dropouts.
+
+**Coming back.** Opening Aloud again (KUAL or the scriptlet) finds `/var/tmp/aloud.bg`
+and sends `SIGUSR2` to the running launcher instead of starting a second instance; the
+launcher takes the screen (passcode stash, fb dump, status bar off) and only then sends
+`SIGUSR2` to aloud, which re-reads the framebuffer state (`fbink_reinit`: the reader may
+have rotated it), re-grabs input and repaints with GC16.
+
+**Zero-cost controls.** KUAL items "Play / Pause", "Back 30 s", "Forward 30 s" write one
+line into a FIFO (`/var/tmp/aloud.ctl`) that aloud polls. Nothing runs while reading.
+Rejected: listening to the touchscreen ungrabbed for a gesture (wakes on every tap,
+collides with the reader's own gestures) — exactly the lag the owner ruled out.
+
+**Safety rules.**
+- Launcher cleanup repaints the saved screen only if Aloud is in front; in the background
+  the user is reading and the dump would be stale. The passcode flag is restored in every
+  exit path, and cleanup ignores further signals until it is done.
+- A cable plugged in while in the background (powerd `charging`, the same signal KOReader
+  uses) saves and exits: USB drive mode takes `/mnt/us` away from under the open book and
+  our own binary, and two writers on the vfat would risk corruption. Wall chargers stop
+  background playback too; that is the price of never racing volumd.
+- Paused in the background for 10 min (sleep timer, KUAL pause, BT gone) → save and exit,
+  so a forgotten Aloud never holds memory or a Bluetooth stream.
+- The per-launch copy of the launcher (`/var/tmp/aloud-launcher-<pid>.sh`) means a second
+  launch never overwrites a script that is running.
+
+Verified on the host by `tests/test_launcher.sh` (real launcher, fake aloud) and the C
+suite; on-device checks in DEVICE-TESTING.md Phase 5.
+
+## D14. MP4/M4B audio without libavformat's per-frame index
+
+libavformat's mov demuxer keeps an `AVIndexEntry` (24 B) and, since FFmpeg 7.1, a
+per-sample `MOVTimeToSample` (12 B) for **every** audio frame while the file is open, and
+builds a second index while applying the edit list. Measured on the owner's 8.6 h M4B
+(1.33 M AAC frames): **113 MB peak**, ~90 MB held — a fifth of a PW5's RAM, which
+background playback would hold while the stock reader runs.
+
+`src/mp4lite.c` reads the first sound track itself: run-length tables (stts, stsc, stco/
+co64) in memory (~10 KB for that book), stsz streamed from the file through a 4 KiB
+window, AAC packets handed straight to libavcodec with the `esds` AudioSpecificConfig as
+extradata, edit-list priming dropped via `AV_PKT_DATA_SKIP_SAMPLES` like libavformat does.
+Result on that book: **4.7 MB peak, open 2 ms instead of 55 ms**; PCM bit-identical to
+libavformat from the start, seeks land as close or closer (tests/test_main.c).
+
+Scope is deliberately narrow — non-fragmented file, AAC (`mp4a`/`esds`, OTI 0x40/0x66-68),
+at most one non-empty edit. Anything else returns an error and the decoder silently uses
+libavformat (`ALOUD_NO_MP4LITE=1` forces that). Every size from the file is bounds-checked;
+4,000 mutated M4Bs ran clean under ASan/UBSan. `decoder_probe` (library scan, once per new
+or changed file, foreground only) still uses libavformat.
+
+The resampler is now rebuilt whenever a decoded frame's rate/format/channels differ from
+what it was built for (HE-AAC reports its SBR rate only after the first frame).

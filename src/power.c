@@ -88,7 +88,7 @@ int power_start(PowerMonitor *pm) {
         close_inherited_fds();
         execl("/usr/bin/lipc-wait-event", "lipc-wait-event", "-m", "-s", "0",
               "com.lab126.powerd",
-              "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,readyToSuspend,wakeupFromSuspend,suspending",
+              "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,readyToSuspend,wakeupFromSuspend,suspending,charging",
               (char *)NULL);
         _exit(127);
     }
@@ -141,6 +141,11 @@ PowerEventType power_parse_event_line(const char *line) {
     }
     if (strstr(line, "suspending") != NULL) {
         return POWER_EVT_SUSPENDING;
+    }
+    /* "notCharging" (unplugged) contains "Charging", never "charging". KOReader uses the
+     * same event as its USB plug-in signal (frontend/device/kindle/device.lua). */
+    if (strstr(line, "charging") != NULL && strstr(line, "notCharging") == NULL) {
+        return POWER_EVT_CHARGING;
     }
     return POWER_EVT_NONE;
 }
@@ -204,6 +209,9 @@ int power_handle_readable(PowerMonitor *pm, bool is_playing,
                     }
                     break;
                 }
+                case POWER_EVT_CHARGING:
+                    pm->charging_event = true;
+                    break;
                 case POWER_EVT_SUSPENDING:
                 case POWER_EVT_NONE:
                     break;

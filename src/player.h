@@ -74,6 +74,10 @@ int player_set_speed(Player *p, int speed_x100);
 int player_set_volume(Player *p, int volume_pct);
 int player_set_sleep_timer(Player *p, int sleep_mode); /* 0, 5, 15, 30, 45, 60, or -1 */
 
+/* Background playback (ARCHITECTURE.md D13): stop per-second notifications, write
+ * in larger slices, and run the audio thread at a lower CPU priority. */
+void player_set_background(Player *p, bool background);
+
 /* Advance idle housekeeping (closes audio helper after 2 min paused, autosaves
  * every 60 s while playing). */
 void player_housekeeping_tick(Player *p, int64_t elapsed_wall_ms);
