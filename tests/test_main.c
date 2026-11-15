@@ -21,6 +21,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <time.h>
+
+/* usleep() is not declared under _POSIX_C_SOURCE 200809L on glibc. */
+static void sleep_us(long us) {
+    struct timespec ts = {us / 1000000L, (us % 1000000L) * 1000L};
+    while (nanosleep(&ts, &ts) != 0) {}
+}
+
+
 static int g_tests_run = 0;
 static int g_tests_failed = 0;
 
@@ -804,20 +813,20 @@ static void test_gst_backend_with_fake_helper(const char *fixture_dir) {
     /* Pause ends the stream at once (the mixer daemon would otherwise play seconds of
      * buffered audio); resume starts a fresh helper on the next write. */
     CHECK(ao->set_paused(ao, true) == 0, "pause");
-    usleep(300000);
+    sleep_us(300000);
     CHECK(count_lines_with(logp, "STOP") == 1 && count_lines_with(logp, "EXIT") == 1,
           "pause stops the helper (stops=%d exits=%d)", count_lines_with(logp, "STOP"),
           count_lines_with(logp, "EXIT"));
     CHECK(ao->set_paused(ao, false) == 0, "resume");
     CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write after resume");
-    usleep(300000);
+    sleep_us(300000);
     CHECK(count_lines_with(logp, "START") == 2, "resume started a fresh helper");
 
     /* Seek: flush ends the stream; the next write starts a new one. */
     CHECK(ao->flush(ao) == 0, "flush");
     CHECK(ao->set_paused(ao, false) == 0, "resume during pending restart is a no-op");
     CHECK(ao->write_s16le(ao, pcm, 4096) == 4096, "write after flush");
-    usleep(300000);
+    sleep_us(300000);
     CHECK(count_lines_with(logp, "START") == 3, "flush replaced the helper (starts=%d)",
           count_lines_with(logp, "START"));
     CHECK(count_lines_with(logp, "STOP") == 2 && count_lines_with(logp, "EXIT") == 2,
@@ -825,7 +834,7 @@ static void test_gst_backend_with_fake_helper(const char *fixture_dir) {
     (void)ao->delay_ms(ao);
 
     audio_out_close(ao);
-    usleep(200000);
+    sleep_us(200000);
     CHECK(count_lines_with(logp, "EXIT") == 3, "close stops the current helper");
     struct stat st;
     CHECK(stat("/tmp/aloud_audio.fifo", &st) != 0, "FIFO removed on close");
