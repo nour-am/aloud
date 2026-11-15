@@ -53,7 +53,7 @@ FBINK_FLAGS := \
 	-DFBINK_WITH_IMAGE \
 	-DFBINK_VERSION='"886f25f-aloud"'
 
-.PHONY: all test sim showcase kindle package clean
+.PHONY: all test sim showcase demo-video kindle package clean
 
 all: test sim kindle package
 
@@ -67,10 +67,10 @@ build/host/test_aloud: $(CORE_SRCS) tests/test_main.c build/host/sonic.o
 		$(CORE_SRCS) tests/test_main.c build/host/sonic.o \
 		$(HOST_FFMPEG_LIB) $(HOST_LDFLAGS) -o $@
 
-build/host/aloud-sim: $(CORE_SRCS) src/main.c build/host/sonic.o
+build/host/aloud-sim: $(CORE_SRCS) src/main.c src/demo.c src/demo.h build/host/sonic.o
 	@mkdir -p build/host
 	$(HOST_CC) $(CFLAGS_OUR) $(INCLUDES_COMMON) $(HOST_FFMPEG_INC) \
-		$(CORE_SRCS) src/main.c build/host/sonic.o \
+		$(CORE_SRCS) src/main.c src/demo.c build/host/sonic.o \
 		$(HOST_FFMPEG_LIB) $(HOST_LDFLAGS) -o $@
 
 test: build/host/test_aloud
@@ -98,6 +98,10 @@ sim: build/host/aloud-sim
 # README images (docs/media/): multilingual demo library rendered by the simulator.
 showcase: build/host/aloud-sim
 	./tools/make-showcase.sh
+
+# docs/media/demo.mp4: scripted tour with real audio (downloads a LibriVox recording).
+demo-video: showcase
+	./tools/make-demo-video.sh
 
 build/kindle/tp.o: third_party/sonic/sonic.c $(FBINK_SRCS)
 	@mkdir -p build/kindle/fbink_objs
@@ -168,6 +172,9 @@ package: kindle
 	   third_party/fonts/NotoSansArabicUI-Regular.ttf \
 	   third_party/fonts/NotoSansArabicUI-Bold.ttf \
 	   third_party/fonts/Noto-OFL.txt \
+	   third_party/fonts/NotoSansCJK-Regular.otf \
+	   third_party/fonts/NotoSansCJK-Bold.otf \
+	   third_party/fonts/NotoSansCJK-OFL.txt \
 	   build/pkg/extensions/aloud/fonts/
 	cp package/audiobooks-README.txt build/pkg/audiobooks/README.txt
 	cp LICENSE build/pkg/extensions/aloud/LICENSE.txt

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Render the README showcase: a demo library of public-domain audiobooks in eight
+# Render the README showcase: a demo library of popular audiobooks in five
 # languages, drawn by the real UI code (build/host/aloud-sim), then framed in a
 # Kindle-style bezel and assembled into docs/media/*.png + an animated GIF.
 #
@@ -23,42 +23,7 @@ command -v magick >/dev/null || { echo "ImageMagick 7 (magick) is required" >&2;
 rm -rf "$OUT"
 mkdir -p "$LIB" "$OUT/tmp" "$OUT/screens" "$MEDIA"
 
-# ---------------------------------------------------------------------------
-# Covers (600x600 grayscale; the app dithers them to 16 levels like e-ink).
-# cover <out> <style> <title> <author>
-cover() {
-  out=$1 style=$2 title=$3 author=$4 fg=white
-  base="$OUT/tmp/base.png"
-  case $style in
-    light) fg=black
-           magick -size 600x600 xc:white -fill none -stroke black -strokewidth 6 \
-             -draw 'rectangle 24,24 575,575' -strokewidth 2 -draw 'rectangle 40,40 559,559' "$base" ;;
-    dark)  magick -size 600x600 xc:black -fill none -stroke white -strokewidth 2 \
-             -draw 'rectangle 36,36 563,563' -draw 'line 200,420 400,420' "$base" ;;
-    sun)   magick -size 600x600 gradient:'#d8d8d8-#202020' -fill white -stroke none \
-             -draw 'circle 300,170 300,95' "$base" ;;
-    waves) magick -size 600x600 gradient:'#505050-#000000' \
-             \( -size 600x600 gradient: -rotate 90 -function sinusoid 9,0,0.25,0.6 \) \
-             -compose multiply -composite "$base" ;;
-    rules) magick -size 600x600 gradient:'#3a3a3a-#000000' -fill none -stroke white \
-             -strokewidth 3 -draw 'line 60,120 540,120' -draw 'line 60,480 540,480' \
-             -strokewidth 1 -draw 'line 60,132 540,132' -draw 'line 60,468 540,468' "$base" ;;
-    star)  magick -size 600x600 xc:'#101010' -fill none -stroke '#e8e8e8' -strokewidth 5 \
-             -draw 'rectangle 150,150 450,450' \
-             -draw 'translate 300,300 rotate 45 rectangle -150,-150 150,150' \
-             -strokewidth 2 -draw 'circle 300,300 300,110' -draw 'circle 300,300 300,95' \
-             -fill '#e8e8e8' -stroke none -draw 'circle 300,300 300,262' "$base" ;;
-  esac
-  if [ -n "$title" ]; then
-    magick "$base" \
-      \( -background none -fill "$fg" -font "$SERIF" -pointsize 64 -size 470x \
-         -gravity center caption:"$title" \) -gravity center -geometry +0-10 -composite \
-      \( +size -background none -fill "$fg" -font "$SANS" -pointsize 30 label:"$author" \) \
-      -gravity south -geometry +0+64 -composite -colorspace gray "$out"
-  else
-    magick "$base" -colorspace gray "$out"
-  fi
-}
+. "$ROOT/tools/showcase-cover.sh"
 
 # ---------------------------------------------------------------------------
 # Books. Chapter list file: one "minutes<TAB>title" per line.
@@ -106,83 +71,82 @@ mp3dir() {
 ch() { printf '%s\n' "$@" > "$OUT/tmp/ch.txt"; echo "$OUT/tmp/ch.txt"; }
 T='	'
 
-cover "$OUT/tmp/en.png" light "Pride and Prejudice" "Jane Austen"
-m4b "Pride and Prejudice.m4b" "Pride and Prejudice" "Jane Austen" "$OUT/tmp/en.png" "$(ch \
-  "28${T}Chapter 1" "31${T}Chapter 2" "26${T}Chapter 3" "34${T}Chapter 4" "29${T}Chapter 5" \
-  "41${T}Chapter 6" "37${T}Chapter 7" "33${T}Chapter 8" "38${T}Chapter 9" "35${T}Chapter 10" \
-  "32${T}Chapter 11" "36${T}Chapter 12")"
+CJK="$FONTS/NotoSansCJK-Bold.otf"
+CJKR="$FONTS/NotoSansCJK-Regular.otf"
 
-cover "$OUT/tmp/fr.png" dark "Les Misérables" "Victor Hugo"
-m4b "Les Misérables.m4b" "Les Misérables" "Victor Hugo" "$OUT/tmp/fr.png" "$(ch \
-  "42${T}Monsieur Myriel" "38${T}Monsieur Myriel devient monseigneur Bienvenu" \
-  "35${T}À bon évêque dur évêché" "47${T}Les œuvres semblables aux paroles" \
-  "40${T}Comment monseigneur faisait durer ses soutanes" "44${T}Par qui il faisait garder sa maison" \
-  "39${T}Cravatte" "51${T}Philosophie après boire" "36${T}Le frère raconté par la sœur" \
-  "48${T}L’évêque en présence d’une lumière inconnue")"
+# numbered <count> <minutes> <label-command>: chapter list via a label function.
+numbered() {
+  n=$1 min=$2 fn=$3 i=0
+  : > "$OUT/tmp/ch.txt"
+  while [ $i -lt "$n" ]; do
+    i=$((i + 1))
+    printf '%s\t%s\n' $((min + (i * 7) % 11 - 5)) "$($fn $i)" >> "$OUT/tmp/ch.txt"
+  done
+  echo "$OUT/tmp/ch.txt"
+}
+en_ch() { echo "Chapter $1"; }
+es_ch() { echo "Capítulo $1"; }
+cjk_num() { # 1..40 in kanji numerals
+  set -- "$1" 一 二 三 四 五 六 七 八 九 十
+  n=$1; shift
+  t=$((n / 10)) o=$((n % 10)) s=""
+  if [ $t -gt 1 ]; then eval "s=\${$t}"; fi
+  [ $t -ge 1 ] && s="$s十"
+  if [ $o -gt 0 ]; then eval "s=\$s\${$o}"; fi
+  echo "$s"
+}
+ja_ch() { echo "第$(cjk_num "$1")章"; }
+zh_ch() { echo "第$(cjk_num "$1")章"; }
+ar_ch() {
+  set -- "$1" الأول الثاني الثالث الرابع الخامس السادس السابع الثامن التاسع العاشر \
+    "الحادي عشر" "الثاني عشر" "الثالث عشر" "الرابع عشر" "الخامس عشر" "السادس عشر" \
+    "السابع عشر" "الثامن عشر" "التاسع عشر" العشرون
+  n=$1; shift
+  eval "echo \"الفصل \${$n}\""
+}
 
-cover "$OUT/tmp/es.png" sun "Don Quijote" "Miguel de Cervantes"
-mp3dir "Miguel de Cervantes - Don Quijote" "Don Quijote de la Mancha" "Miguel de Cervantes" "$OUT/tmp/es.png" "$(ch \
-  "24${T}Capítulo I — Que trata de la condición del famoso hidalgo" \
-  "31${T}Capítulo II — De la primera salida del ingenioso don Quijote" \
-  "27${T}Capítulo III — De la graciosa manera de armarse caballero" \
-  "29${T}Capítulo IV — De lo que le sucedió al salir de la venta" \
-  "22${T}Capítulo V — Donde se prosigue la narración de la desgracia" \
-  "33${T}Capítulo VI — Del donoso y grande escrutinio")"
+# Popular titles across the five languages (generated covers; the real artwork is
+# the publishers'). Chapter names are generic.
+cover "$OUT/tmp/en.png" dark "Project Hail Mary" "Andy Weir"
+m4b "Andy Weir - Project Hail Mary.m4b" "Project Hail Mary" "Andy Weir" "$OUT/tmp/en.png" \
+  "$(numbered 30 32 en_ch)"
 
-m4b "Franz Kafka - Der Prozeß.m4b" "Der Prozeß" "Franz Kafka" - "$(ch \
-  "46${T}Verhaftung" "38${T}Gespräch mit Frau Grubach · Dann Fräulein Bürstner" \
-  "52${T}Erste Untersuchung" "41${T}Im leeren Sitzungssaal · Der Student · Die Kanzleien" \
-  "18${T}Der Prügler" "49${T}Der Onkel · Leni" "77${T}Advokat · Fabrikant · Maler" \
-  "58${T}Kaufmann Block · Kündigung des Advokaten" "44${T}Im Dom" "12${T}Ende")"
+cover "$OUT/tmp/ja.png" light "イン・ザ・メガチャーチ" "朝井リョウ" "$CJK" "$CJKR"
+m4b "朝井リョウ - イン・ザ・メガチャーチ.m4b" "イン・ザ・メガチャーチ" "朝井リョウ" "$OUT/tmp/ja.png" \
+  "$(numbered 14 48 ja_ch)"
 
-cover "$OUT/tmp/ru.png" rules "Анна Каренина" "Лев Толстой"
-m4b "Анна Каренина.m4b" "Анна Каренина" "Лев Толстой" "$OUT/tmp/ru.png" "$(ch \
-  "54${T}Часть первая" "61${T}Часть вторая" "58${T}Часть третья" "47${T}Часть четвёртая" \
-  "63${T}Часть пятая" "56${T}Часть шестая" "49${T}Часть седьмая" "38${T}Часть восьмая")"
+cover "$OUT/tmp/es.png" sun "Los huérfanos" "Carmen Mola"
+mp3dir "Carmen Mola - Los huérfanos" "Los huérfanos" "Carmen Mola" "$OUT/tmp/es.png" \
+  "$(numbered 18 27 es_ch)"
 
-cover "$OUT/tmp/el.png" waves "Οδύσσεια" "Όμηρος"
-m4b "Οδύσσεια.m4b" "Οδύσσεια" "Όμηρος" "$OUT/tmp/el.png" "$(ch \
-  "33${T}Ραψωδία α — Θεών αγορά" "29${T}Ραψωδία β — Ιθακησίων αγορά" \
-  "36${T}Ραψωδία γ — Τα εν Πύλω" "48${T}Ραψωδία δ — Τα εν Λακεδαίμονι" \
-  "31${T}Ραψωδία ε — Οδυσσέως σχεδία" "22${T}Ραψωδία ζ — Οδυσσέως άφιξις εις Φαίακας")"
+cover "$OUT/tmp/zh.png" rules "三体" "刘慈欣" "$CJK" "$CJKR"
+m4b "刘慈欣 - 三体.m4b" "三体" "刘慈欣" "$OUT/tmp/zh.png" "$(numbered 36 22 zh_ch)"
 
 cover "$OUT/tmp/ar.png" star "" ""
-m4b "كليلة ودمنة.m4b" "كليلة ودمنة" "ابن المقفع" "$OUT/tmp/ar.png" "$(ch \
-  "34${T}باب الأسد والثور" "41${T}باب الفحص عن أمر دمنة" "28${T}باب الحمامة المطوقة" \
-  "37${T}باب البوم والغربان" "23${T}باب القرد والغيلم" "19${T}باب الناسك وابن عرس")"
-
-cover "$OUT/tmp/pl.png" light "Pan Tadeusz" "Adam Mickiewicz"
-m4b "Pan Tadeusz.m4b" "Pan Tadeusz" "Adam Mickiewicz" "$OUT/tmp/pl.png" "$(ch \
-  "52${T}Księga pierwsza — Gospodarstwo" "47${T}Księga druga — Zamek" \
-  "44${T}Księga trzecia — Umizgi" "58${T}Księga czwarta — Dyplomatyka i łowy" \
-  "49${T}Księga piąta — Kłótnia" "38${T}Księga szósta — Zaścianek")"
+m4b "أوراق شمعون المصري.m4b" "أوراق شمعون المصري" "أسامة عبد الرءوف الشاذلي" "$OUT/tmp/ar.png" \
+  "$(numbered 20 34 ar_ch)"
 
 # ---------------------------------------------------------------------------
 # Screens. The simulator shows the most recently played book on its Player and
 # Chapters screens, so render once per language with that book on top.
-# key<TAB>file_index<TAB>position_ms<TAB>speed<TAB>updated<TAB>finished
-BOOKS="en|Pride and Prejudice.m4b|0|8040000
-fr|Les Misérables.m4b|0|15300000
-es|Miguel de Cervantes - Don Quijote|2|420000
-de|Franz Kafka - Der Prozeß.m4b|0|0
-ru|Анна Каренина.m4b|0|9500000
-el|Οδύσσεια.m4b|0|4200000
-ar|كليلة ودمنة.m4b|0|5100000
-pl|Pan Tadeusz.m4b|0|2400000"
+# The library lists books most recent first, so timestamps keep EN, JA, ES, ZH, AR.
+LANGS="en ja es zh ar"
+BOOKS="en|Andy Weir - Project Hail Mary.m4b|0|21300000|1793690500
+ja|朝井リョウ - イン・ザ・メガチャーチ.m4b|0|9100000|1793690400
+es|Carmen Mola - Los huérfanos|6|540000|1793690300
+zh|刘慈欣 - 三体.m4b|0|25800000|1793690200
+ar|أوراق شمعون المصري.m4b|0|14700000|1793690100"
 
 positions() { # lang-on-top
   echo "# aloud-positions-v1"
-  t=1793600000
-  echo "$BOOKS" | while IFS='|' read -r lang key idx pos; do
-    t=$((t + 100))
-    [ "$pos" = 0 ] && [ "$lang" != "$1" ] && continue
-    up=$t; [ "$lang" = "$1" ] && up=1793690000
+  echo "$BOOKS" | while IFS='|' read -r lang key idx pos up; do
+    [ "$lang" = "$1" ] && up=1793699999
     printf '%s\t%s\t%s\t100\t%s\t0\n' "$key" "$idx" "$pos" "$up"
   done
   echo "# end"
 }
 
-for lang in en fr es de ru el ar pl; do
+for lang in library $LANGS; do
   st="$OUT/state-$lang"
   mkdir -p "$st"
   positions "$lang" > "$st/positions.tsv"
@@ -218,32 +182,32 @@ S="$OUT/screens"
 F="$OUT/frames"
 mkdir -p "$F"
 
-# Hero: Library, Player (French), Chapters (Greek), side by side.
-device "$S/en/pw5_library.png"  "$F/hero1.png" 560
-device "$S/fr/pw5_player.png"   "$F/hero2.png" 560
-device "$S/el/pw5_chapters.png" "$F/hero3.png" 560
+# Hero: Library (EN, JA, ES, ZH in order), the Player in English, Chapters in Japanese.
+rm -f "$MEDIA"/*.png "$MEDIA"/*.gif
+device "$S/library/pw5_library.png" "$F/hero1.png" 560
+device "$S/en/pw5_player.png"       "$F/hero2.png" 560
+device "$S/ja/pw5_chapters.png"     "$F/hero3.png" 560
 magick -background none "$F/hero1.png" "$F/hero2.png" "$F/hero3.png" +smush 24 \
   -strip "$MEDIA/hero.png"
 
-# Feature screens used in the README table.
-device "$S/ar/pw5_player.png"      "$MEDIA/player-arabic.png" 420
-device "$S/ru/pw5_chapters.png"    "$MEDIA/chapters-russian.png" 420
-device "$S/es/pw5_sheet_speed.png" "$MEDIA/speed.png" 420
-device "$S/de/pw5_sheet_sleep.png" "$MEDIA/sleep-timer.png" 420
-device "$S/pl/pw5_folders.png"     "$MEDIA/folders.png" 420
-device "$S/en/kt4_player.png"      "$MEDIA/kindle-touch.png" 420
-device_landscape "$S/fr/pw5_landscape_player.png" "$MEDIA/landscape.png" 860
+# README screens, one language each, in order.
+device "$S/ja/pw5_player.png"      "$MEDIA/player-japanese.png" 420
+device "$S/es/pw5_chapters.png"    "$MEDIA/chapters-spanish.png" 420
+device "$S/zh/pw5_sheet_speed.png" "$MEDIA/speed-chinese.png" 420
+device "$S/ar/pw5_sheet_sleep.png" "$MEDIA/sleep-arabic.png" 420
+device_landscape "$S/en/pw5_landscape_player.png" "$MEDIA/landscape.png" 860
+device "$S/zh/kt4_player.png"      "$MEDIA/kindle-touch.png" 420
 
-# Language tour GIF: the Player in eight languages, with the black-white flash an
+# Language tour GIF: the Player in each language, with the black-white flash an
 # e-ink panel does on a full refresh between books.
 G="$OUT/gif"
 mkdir -p "$G"
 set --
-for lang in en fr es de pl ru el ar; do
+for lang in $LANGS; do
   device "$S/$lang/pw5_player.png" "$G/$lang.png" 380 flat
   magick "$S/$lang/pw5_player.png" -negate "$G/$lang-neg.png"
   device "$G/$lang-neg.png" "$G/$lang-flash.png" 380 flat
-  set -- "$@" -delay 12 "$G/$lang-flash.png" -delay 190 "$G/$lang.png"
+  set -- "$@" -delay 12 "$G/$lang-flash.png" -delay 200 "$G/$lang.png"
 done
 magick -dispose background "$@" -channel A -threshold 50% +channel -loop 0 -layers optimize -colors 64 "$MEDIA/languages.gif"
 

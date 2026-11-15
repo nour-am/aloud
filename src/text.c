@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
@@ -38,11 +42,16 @@ typedef struct {
     size_t ttf_len;
     stbtt_fontinfo info;
     bool loaded;
+    bool mapped; /* ttf_data is an mmap of the file, not a heap copy */
 } LoadedFont;
+
+/* CJK fallback: one face for regular slots, one for bold. */
+enum { CJK_REGULAR = 0, CJK_BOLD = 1, CJK_COUNT = 2 };
 
 struct TextSystem {
     LoadedFont fonts[FONT_COUNT];
     LoadedFont fallback_fonts[FONT_COUNT];
+    LoadedFont cjk_fonts[CJK_COUNT];
     CachedGlyph cache[GLYPH_CACHE_CAP];
     uint64_t use_clock;
 };
@@ -134,6 +143,53 @@ static int load_one_font(LoadedFont *lf, const char *path) {
     return 0;
 }
 
+/* Large fallback fonts (CJK, 2.5 MB each) are memory-mapped instead of copied to the
+ * heap: the kernel pages in only the glyph outlines actually drawn, and clean pages
+ * can be dropped under memory pressure, so an all-Latin library costs almost nothing. */
+static int load_font_mapped(LoadedFont *lf, const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -errno;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        int e = -errno;
+        close(fd);
+        return e;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 64 || st.st_size > 32 * 1024 * 1024) {
+        close(fd);
+        return -EINVAL;
+    }
+    size_t len = (size_t)st.st_size;
+    void *map = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd); /* the mapping keeps the file referenced */
+    if (map == MAP_FAILED) return -ENOMEM;
+
+    uint8_t *data = map;
+    int off = -1;
+    if (text_validate_ttf_bytes(data, len)) {
+        off = stbtt_GetFontOffsetForIndex(data, 0);
+    }
+    if (off < 0 || !stbtt_InitFont(&lf->info, data, off)) {
+        munmap(map, len);
+        return -EINVAL;
+    }
+    lf->ttf_data = data;
+    lf->ttf_len = len;
+    lf->loaded = true;
+    lf->mapped = true;
+    return 0;
+}
+
+static void unload_font(LoadedFont *lf) {
+    if (!lf->ttf_data) return;
+    if (lf->mapped) {
+        munmap(lf->ttf_data, lf->ttf_len);
+    } else {
+        free(lf->ttf_data);
+    }
+    memset(lf, 0, sizeof(*lf));
+}
+
 int text_init(TextSystem **out, const char *font_dir) {
     if (!out || !font_dir) return -EINVAL;
     *out = NULL;
@@ -165,6 +221,16 @@ int text_init(TextSystem **out, const char *font_dir) {
         snprintf(path, sizeof(path), "%s/%s", font_dir, kFallbackFiles[i]);
         (void)load_one_font(&ts->fallback_fonts[i], path);
     }
+    /* Optional: without them CJK characters draw as "?" like any missing glyph. */
+    static const char *const kCjkFiles[CJK_COUNT] = {
+        "NotoSansCJK-Regular.otf",
+        "NotoSansCJK-Bold.otf"
+    };
+    for (int i = 0; i < CJK_COUNT; i++) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s", font_dir, kCjkFiles[i]);
+        (void)load_font_mapped(&ts->cjk_fonts[i], path);
+    }
 
     *out = ts;
     return 0;
@@ -178,8 +244,11 @@ void text_free(TextSystem *ts) {
         }
     }
     for (int i = 0; i < FONT_COUNT; i++) {
-        free(ts->fonts[i].ttf_data);
-        free(ts->fallback_fonts[i].ttf_data);
+        unload_font(&ts->fonts[i]);
+        unload_font(&ts->fallback_fonts[i]);
+    }
+    for (int i = 0; i < CJK_COUNT; i++) {
+        unload_font(&ts->cjk_fonts[i]);
     }
     free(ts);
 }
@@ -406,6 +475,15 @@ static const LoadedFont *get_fallback_font(const TextSystem *ts, FontId font) {
     return ts->fallback_fonts[font].loaded ? &ts->fallback_fonts[font] : NULL;
 }
 
+static const LoadedFont *get_cjk_font(const TextSystem *ts, FontId font) {
+    if (!ts) return NULL;
+    bool bold = (font == FONT_SERIF_BOLD || font == FONT_SANS_BOLD);
+    const LoadedFont *lf = &ts->cjk_fonts[bold ? CJK_BOLD : CJK_REGULAR];
+    if (lf->loaded) return lf;
+    lf = &ts->cjk_fonts[bold ? CJK_REGULAR : CJK_BOLD];
+    return lf->loaded ? lf : NULL;
+}
+
 int text_ascent(TextSystem *ts, FontId font, int size_px) {
     const LoadedFont *lf = get_font(ts, font);
     if (!lf || size_px <= 0) return size_px;
@@ -460,11 +538,12 @@ static CachedGlyph *get_cached_glyph(TextSystem *ts, FontId font, int size_px, u
     bool from_fb = false;
     int gidx = stbtt_FindGlyphIndex(&lf->info, (int)cp);
     if (gidx == 0 && cp != ' ') {
-        const LoadedFont *fb = get_fallback_font(ts, font);
-        if (fb) {
-            int fb_idx = stbtt_FindGlyphIndex(&fb->info, (int)cp);
+        const LoadedFont *chain[2] = { get_fallback_font(ts, font), get_cjk_font(ts, font) };
+        for (int k = 0; k < 2 && gidx == 0; k++) {
+            if (!chain[k]) continue;
+            int fb_idx = stbtt_FindGlyphIndex(&chain[k]->info, (int)cp);
             if (fb_idx != 0) {
-                active_lf = fb;
+                active_lf = chain[k];
                 gidx = fb_idx;
                 from_fb = true;
             }
@@ -474,7 +553,14 @@ static CachedGlyph *get_cached_glyph(TextSystem *ts, FontId font, int size_px, u
         }
     }
 
-    float scale = stbtt_ScaleForPixelHeight(&active_lf->info, (float)size_px);
+    /* Fallback faces are scaled to the primary font's em size, not its line height:
+     * Noto's tall ascender/descender metrics would otherwise draw Arabic and CJK
+     * visibly smaller than the Latin text beside them. */
+    float scale = stbtt_ScaleForPixelHeight(&lf->info, (float)size_px);
+    if (from_fb) {
+        float em_px = scale / stbtt_ScaleForMappingEmToPixels(&lf->info, 1.0f);
+        scale = stbtt_ScaleForMappingEmToPixels(&active_lf->info, em_px);
+    }
     int adv = 0, lsb = 0;
     stbtt_GetGlyphHMetrics(&active_lf->info, gidx, &adv, &lsb);
 
@@ -652,6 +738,47 @@ int text_draw_line(TextSystem *ts, Canvas *c, FontId font, int size_px,
     return w;
 }
 
+static bool is_cjk_cp(uint32_t cp) {
+    return (cp >= 0x2E80 && cp <= 0x9FFF) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFF00 && cp <= 0xFFEF) || (cp >= 0x20000 && cp <= 0x3FFFF);
+}
+
+/* Closing punctuation and the long-vowel mark must not start a line (basic kinsoku). */
+static bool cjk_no_line_start(uint32_t cp) {
+    switch (cp) {
+        case 0x3001: case 0x3002: case 0x3009: case 0x300B: case 0x300D: case 0x300F:
+        case 0x3011: case 0x3015: case 0x30FC: case 0xFF01: case 0xFF09: case 0xFF0C:
+        case 0xFF0E: case 0xFF1A: case 0xFF1B: case 0xFF1F:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* End of the next unbreakable unit starting at s (s is not a space): a run of
+ * non-CJK characters up to a space, newline or CJK character, or a single CJK
+ * character with any punctuation that must stay attached to it. CJK text has no
+ * spaces, so without this a Japanese or Chinese title could never wrap. */
+static const char *wrap_unit_end(const char *s) {
+    const char *q = s;
+    uint32_t cp = utf8_next(&q);
+    if (is_cjk_cp(cp)) {
+        for (;;) {
+            const char *r = q;
+            uint32_t n = utf8_next(&r);
+            if (n == 0 || !cjk_no_line_start(n)) break;
+            q = r;
+        }
+        return q;
+    }
+    while (*q && *q != ' ' && *q != '\n') {
+        const char *r = q;
+        if (is_cjk_cp(utf8_next(&r))) break;
+        q = r;
+    }
+    return q;
+}
+
 int text_draw_wrapped(TextSystem *ts, Canvas *c, FontId font, int size_px,
                       int x, int y, int max_w, int max_lines, int line_gap_px,
                       const char *utf8, uint8_t tone, unsigned flags) {
@@ -683,10 +810,7 @@ int text_draw_wrapped(TextSystem *ts, Canvas *c, FontId font, int size_px,
         while (*scan) {
             while (*scan == ' ') scan++;
             if (!*scan) break;
-            const char *word_end = scan;
-            while (*word_end && *word_end != ' ' && *word_end != '\n') {
-                word_end++;
-            }
+            const char *word_end = wrap_unit_end(scan);
             size_t candidate_len = (size_t)(word_end - p);
             char candidate[1024];
             if (candidate_len >= sizeof(candidate)) {
@@ -714,8 +838,7 @@ int text_draw_wrapped(TextSystem *ts, Canvas *c, FontId font, int size_px,
             if (*p == '\n') p++;
         } else {
             /* Single long word exceeds max_w: advance to next space and truncate line. */
-            const char *word_end = p;
-            while (*word_end && *word_end != ' ' && *word_end != '\n') word_end++;
+            const char *word_end = wrap_unit_end(p);
             size_t len = (size_t)(word_end - p);
             if (len >= sizeof(line_str)) len = sizeof(line_str) - 1;
             memcpy(line_str, p, len);

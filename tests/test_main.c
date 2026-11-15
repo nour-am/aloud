@@ -498,6 +498,40 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
     CHECK(w_ar_nfc > 80 && w_ar_nfc == w_ar_nfd,
           "Arabic NFC & NFD titles shape identically (%d == %d)", w_ar_nfc, w_ar_nfd);
 
+    /* CJK fallback: real glyphs (not "?"), full-width, Bold differs from Regular. */
+    int w_q = text_measure_width(ts, FONT_SANS_REGULAR, 40, "????", TEXT_FLAG_NONE);
+    int w_ja = text_measure_width(ts, FONT_SANS_REGULAR, 40, "成瀬は天", TEXT_FLAG_NONE);
+    int w_zh = text_measure_width(ts, FONT_SERIF_BOLD, 40, "三体问题", TEXT_FLAG_NONE);
+    CHECK(w_ja != w_q && w_ja >= 4 * 28 && w_ja <= 4 * 40,
+          "Japanese draws full-width CJK glyphs at the em size (%d px, \"?\" run %d)", w_ja, w_q);
+    CHECK(w_zh >= 4 * 24 && w_zh <= 4 * 40, "Chinese bold draws full-width glyphs (%d px)", w_zh);
+    {
+        Canvas cc;
+        CHECK(canvas_init(&cc, 400, 120, 300) == 0, "canvas for CJK ink check");
+        canvas_clear(&cc, TONE_WHITE);
+        text_draw_line(ts, &cc, FONT_SANS_REGULAR, 40, 0, 0, 400, "汉字", TONE_BLACK, TEXT_FLAG_NONE);
+        long ink_r = 0, ink_b = 0;
+        for (int i = 0; i < 400 * 120; i++) ink_r += 255 - cc.pixels[i];
+        canvas_clear(&cc, TONE_WHITE);
+        text_draw_line(ts, &cc, FONT_SANS_BOLD, 40, 0, 0, 400, "汉字", TONE_BLACK, TEXT_FLAG_NONE);
+        for (int i = 0; i < 400 * 120; i++) ink_b += 255 - cc.pixels[i];
+        CHECK(ink_r > 0 && ink_b > ink_r * 11 / 10,
+              "CJK Bold uses the bold face (ink %ld vs regular %ld)", ink_b, ink_r);
+        canvas_free(&cc);
+    }
+
+    /* Wrapping: CJK has no spaces, so lines must break between characters, and
+     * closing punctuation must not start a line. */
+    const char *zh_long = "我们从来没有像现在这样需要一部好的有声书，因为它能陪伴我们度过漫长的夜晚。";
+    int zh_lines_h = text_draw_wrapped(ts, NULL, FONT_SANS_REGULAR, 40, 0, 0, 300, 6, 0,
+                                       zh_long, TONE_BLACK, TEXT_FLAG_NONE);
+    int lh40 = text_line_height(ts, FONT_SANS_REGULAR, 40);
+    CHECK(zh_lines_h >= 3 * lh40, "long Chinese title wraps onto several lines (%d px)", zh_lines_h);
+    int mixed_h = text_draw_wrapped(ts, NULL, FONT_SANS_REGULAR, 40, 0, 0, 2000, 3, 0,
+                                    "Project Hail Mary 三体", TONE_BLACK,
+                                    TEXT_FLAG_NONE);
+    CHECK(mixed_h == lh40, "mixed Latin + CJK title that fits stays on one line (%d px)", mixed_h);
+
     char lib_dir[1024], state_dir[1024];
     snprintf(lib_dir, sizeof(lib_dir), "%s/library", fixture_dir);
     snprintf(state_dir, sizeof(state_dir), "%s/state", fixture_dir);

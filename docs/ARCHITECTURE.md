@@ -351,3 +351,28 @@ the PW5 as a 107 MB `VmHWM`; on the host the warm launch went from 118 MB to 28 
 
 The resampler is now rebuilt whenever a decoded frame's rate/format/channels differ from
 what it was built for (HE-AAC reports its SBR rate only after the first frame).
+
+## D15. Chinese and Japanese text: a trimmed, memory-mapped Noto Sans CJK
+
+Book titles and chapter names come in any language, and CJK is the largest group the
+Latin/Greek/Cyrillic primaries and the Noto Arabic fallback could not draw (they showed
+"?"). Glyph lookup is now a chain: primary font → per-style fallback (Arabic) → CJK
+(Regular for regular styles, Bold for bold ones).
+
+- **Size.** The full Noto Sans CJK SC OTF is 16 MB per weight. `scripts/fetch-deps.sh`
+  trims it with a pinned fonttools to GB 2312 + JIS X 0208 + Big5 level 1, kana, CJK
+  punctuation and full-width forms (10,898 code points, `scripts/cjk-charset.py`):
+  2.5 MB per weight, +4 MB to the zip. Rarer characters draw as "?" like any missing glyph.
+- **Memory.** The CJK faces are `mmap`ed read-only instead of copied to the heap: only the
+  outline pages of glyphs actually drawn are read, and clean pages can be dropped under
+  pressure, so an all-Latin library costs nothing; the glyph LRU caches what is drawn.
+- **Scale.** Fallback faces are scaled to the primary font's em size, not by
+  `stbtt_ScaleForPixelHeight`: Noto's tall vertical metrics made Arabic (and would make
+  CJK) visibly smaller than adjacent Latin text.
+- **Wrapping.** CJK has no spaces, so `text_draw_wrapped` breaks between CJK characters,
+  keeping closing punctuation and the long-vowel mark off the start of a line.
+
+**Rejected:** the firmware's own CJK fonts under `/usr/java/lib/fonts` (no download cost,
+but not verified on every model and firmware — reliability first); the full 16 MB fonts
+(+30 MB zip, for characters no title uses); Korean (Hangul would add ~1 MB per weight;
+add it when someone asks).

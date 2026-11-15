@@ -5,6 +5,9 @@
 #include "decoder.h"
 #include "library.h"
 #include "platform.h"
+#ifndef ALOUD_KINDLE_BUILD
+#include "demo.h"
+#endif
 #include "player.h"
 #include "power.h"
 #include "store.h"
@@ -620,6 +623,7 @@ int main(int argc, char **argv) {
     const char *helper_dir = "/mnt/us/extensions/aloud/bin";
     const char *export_screens_dir = NULL;
     const char *walkthrough_dir = NULL;
+    const char *demo_dir = NULL;
     bool tone_test = false;
     const char *bench_file = NULL;
     int bench_seconds = 120;
@@ -656,6 +660,8 @@ int main(int argc, char **argv) {
             helper_dir = argv[++i];
         } else if (strcmp(argv[i], "--export-screens") == 0 && i + 1 < argc) {
             export_screens_dir = argv[++i];
+        } else if (strcmp(argv[i], "--demo") == 0 && i + 1 < argc) {
+            demo_dir = argv[++i];
         } else if (strcmp(argv[i], "--walkthrough") == 0 && i + 1 < argc) {
             walkthrough_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
@@ -695,6 +701,14 @@ int main(int argc, char **argv) {
     if (tone_test) {
         return run_tone_test(helper_dir, tone_seconds);
     }
+
+#ifndef ALOUD_KINDLE_BUILD
+    if (demo_dir) {
+        return demo_run(library_dir, state_dir, font_dir, demo_dir) == 0 ? 0 : 1;
+    }
+#else
+    (void)demo_dir;
+#endif
 
     if (walkthrough_dir) {
         return run_interactive_walkthrough(library_dir, state_dir, font_dir, walkthrough_dir);
