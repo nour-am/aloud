@@ -100,7 +100,5 @@ $FF -f concat -safe 0 -i "$OUT/run/segments.txt" -i "$OUT/run/audio.wav" \
   -c:v libx264 -preset slow -crf 24 -tune stillimage -pix_fmt yuv420p -r 30 \
   -c:a aac -b:a 96k -ac 1 -movflags +faststart "$ROOT/docs/media/demo.mp4"
 
-# Poster for the README (the playing screen, framed like the video).
-ffmpeg -hide_banner -loglevel error -y -ss 8 -i "$ROOT/docs/media/demo.mp4" -frames:v 1 \
-  "$ROOT/docs/media/demo-poster.png"
-ls -lh "$ROOT/docs/media/demo.mp4" "$ROOT/docs/media/demo-poster.png"
+ls -lh "$ROOT/docs/media/demo.mp4"
+echo "Upload docs/media/demo.mp4 through github.com (drag into an issue) and put the user-attachments link in README.md."
