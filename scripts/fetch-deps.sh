@@ -17,8 +17,8 @@ SONIC_REV=b93885dcb70aae50c6f76b0fe4e0868f029a077e
 STB_REPO=https://github.com/nothings/stb.git
 STB_REV=d14d46f6b44456eb88beac58cba833a4135d4c89
 
-git_pinned() { # name repo rev [submodules]
-  dir="$TP/$1"
+git_pinned() { # name repo rev [submodule paths...]
+  name=$1 dir="$TP/$1"
   if [ ! -d "$dir/.git" ]; then
     git init -q "$dir"
     git -C "$dir" remote add origin "$2"
@@ -27,13 +27,16 @@ git_pinned() { # name repo rev [submodules]
     git -C "$dir" fetch -q --depth 1 origin "$3"
     git -C "$dir" checkout -q FETCH_HEAD
   fi
-  if [ "${4:-}" = submodules ]; then
-    git -C "$dir" submodule update -q --init --recursive --depth 1
+  if [ $# -gt 3 ]; then
+    shift 3
+    git -C "$dir" submodule update -q --init --depth 1 -- "$@"
   fi
-  echo "$1 @ $(git -C "$dir" rev-parse --short HEAD)"
+  echo "$name @ $(git -C "$dir" rev-parse --short HEAD)"
 }
 
-git_pinned FBInk "$FBINK_REPO" "$FBINK_REV" submodules
+# Only the submodules our FBInk feature set compiles (FBINK_MINIMAL + draw/input/image);
+# i2c-tools, libevdev and libunibreak live on other hosts and are never built.
+git_pinned FBInk "$FBINK_REPO" "$FBINK_REV" stb font8x8
 git_pinned sonic "$SONIC_REPO" "$SONIC_REV"
 git_pinned stb "$STB_REPO" "$STB_REV"
 
