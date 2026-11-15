@@ -34,7 +34,7 @@ Aloud turns a jailbroken Kindle into an audiobook player. Copy your DRM-free `.m
 - **Listen while reading:** keeps playing in the Kindle reader or KOReader.
 - **Never loses your place:** positions survive crashes and dead batteries.
 - **0.75× to 3× speed** with no chipmunk voice, plus a **sleep timer** that fades out.
-- **Any language:** English, 日本語, Español, 中文, العربية and more.
+- **Any language:** Latin, Greek and Cyrillic built in; optional font packs add العربية, 日本語 and 中文.
 - **Made for e-ink:** a clean black-and-white UI with no flashing while you listen.
 
 ## See it in action
@@ -54,7 +54,7 @@ Aloud turns a jailbroken Kindle into an audiobook player. Copy your DRM-free `.m
 | **Paused** | Zero CPU use. |
 | **Playing** | Only the clock redraws, with a fast partial refresh. |
 | **Memory** | 4.7 MB peak on an 8.6-hour M4B. |
-| **Download** | One 6 MB zip, no dependencies. |
+| **Download** | One 1.4 MB zip, no dependencies. |
 
 ## Screens
 
@@ -74,6 +74,9 @@ Needs a **jailbroken Kindle on firmware 5.x** with the hotfix ([how to jailbreak
 2. Unzip it onto the Kindle's USB drive.
 3. Put your audiobooks in the new `audiobooks/` folder.
 4. Eject and tap **Aloud** in your library.
+
+**Arabic, Chinese or Japanese titles?** Also download `aloud-fonts-arabic` (0.3 MB) or
+`aloud-fonts-chinese-japanese` (4 MB) from the same release and unzip it the same way.
 
 KUAL is optional. Using KOReader? Copy `extensions/aloud/koreader/aloud.koplugin` into `koreader/plugins/`.
 
@@ -105,8 +108,8 @@ host to generate test files. Works on macOS and Linux.
 ./scripts/fetch-deps.sh            # pinned FBInk, FFmpeg, sonic, stb and fonts
 ./scripts/build-ffmpeg.sh host
 ./scripts/build-ffmpeg.sh kindle
-make test                          # 234 unit and integration checks
-make package                       # → dist/aloud-<version>.zip
+make test                          # 237 unit and integration checks
+make package                       # → dist/aloud-<version>.zip + font packs
 ```
 
 `make sim` runs the UI without a Kindle; `make showcase` and `make demo-video` rebuild this

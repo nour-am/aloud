@@ -20,8 +20,9 @@ make package && unzip -l dist/aloud-*.zip
 ```
 
 The zip must contain `documents/Aloud.sh`, `extensions/aloud/` (`config.xml`, `menu.json`,
-`aloud.sh`, `bin/aloud`, `bin/aloud-sink-armel`, `bin/aloud-sink-armhf`, `fonts/*.ttf` and
-`fonts/NotoSansCJK-*.otf` with their OFL texts, `koreader/aloud.koplugin/`, `LICENSE.txt`) and `audiobooks/README.txt`.
+`aloud.sh`, `bin/aloud`, `bin/aloud-sink-armel`, `bin/aloud-sink-armhf`, the four
+Literata/Inter `fonts/*.ttf` with their OFL texts, `koreader/aloud.koplugin/`, `LICENSE.txt`) and `audiobooks/README.txt`. `make package` also builds the optional
+`dist/aloud-fonts-{arabic,chinese-japanese}-<version>.zip` packs; the release ships all three.
 
 Privacy sweep over everything that will be pushed (should print nothing unexpected):
 

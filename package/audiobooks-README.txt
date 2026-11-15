@@ -16,3 +16,7 @@ Copy your DRM-free audiobooks into this folder over USB:
      audio files do not have embedded cover art.
 
 Then open "Aloud" from your Kindle library (or from KUAL).
+
+Titles in Arabic, Chinese or Japanese show as "?" until you add a font pack:
+download aloud-fonts-arabic or aloud-fonts-chinese-japanese from the Aloud
+release page and unzip it onto the Kindle the same way as Aloud itself.

@@ -352,7 +352,18 @@ the PW5 as a 107 MB `VmHWM`; on the host the warm launch went from 118 MB to 28 
 The resampler is now rebuilt whenever a decoded frame's rate/format/channels differ from
 what it was built for (HE-AAC reports its SBR rate only after the first frame).
 
-## D15. Chinese and Japanese text: a trimmed, memory-mapped Noto Sans CJK
+## D15. Fonts: a small Latin base, optional language packs
+
+The main zip ships only Literata + Inter, trimmed by `scripts/fetch-deps.sh` (pinned
+fonttools) to Latin incl. Vietnamese, Greek, Cyrillic and the UI's symbols, without hinting
+(stb_truetype ignores it) but with kerning: 1.48 MB → 0.58 MB, which is also heap the app
+no longer holds, since base fonts are read fully into RAM. The zip went from 6.1 MB to
+1.4 MB. Arabic and Chinese/Japanese are separate release assets (`make fontpacks`) that
+unzip into `extensions/aloud/fonts/`; `text_init` loads whatever is present, and without a
+pack those characters draw as "?". Most users never need them, and the CJK pack alone is
+4 MB.
+
+### Chinese and Japanese: a trimmed, memory-mapped Noto Sans CJK
 
 Book titles and chapter names come in any language, and CJK is the largest group the
 Latin/Greek/Cyrillic primaries and the Noto Arabic fallback could not draw (they showed
@@ -362,7 +373,7 @@ Latin/Greek/Cyrillic primaries and the Noto Arabic fallback could not draw (they
 - **Size.** The full Noto Sans CJK SC OTF is 16 MB per weight. `scripts/fetch-deps.sh`
   trims it with a pinned fonttools to GB 2312 + JIS X 0208 + Big5 level 1, kana, CJK
   punctuation and full-width forms (10,898 code points, `scripts/cjk-charset.py`):
-  2.5 MB per weight, +4 MB to the zip. Rarer characters draw as "?" like any missing glyph.
+  2.5 MB per weight (a 4 MB pack). Rarer characters draw as "?" like any missing glyph.
 - **Memory.** The CJK faces are `mmap`ed read-only instead of copied to the heap: only the
   outline pages of glyphs actually drawn are read, and clean pages can be dropped under
   pressure, so an all-Latin library costs nothing; the glyph LRU caches what is drawn.

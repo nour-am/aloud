@@ -21,7 +21,8 @@ First public release.
 - Pitch-preserving speed (0.75×–3×), sleep timer with fade-out and end-of-chapter mode.
 - Atomic position saves with backup recovery; 2-second rewind on resume.
 - Low-memory M4B reader (4.7 MB peak on an 8.6-hour book).
-- Latin, Greek, Cyrillic, Arabic (right-to-left shaping), Chinese and Japanese text.
+- Latin, Greek and Cyrillic text built in; optional Arabic (right-to-left shaping) and
+  Chinese/Japanese font packs.
 - On-device diagnostics, audio test and performance measurement from KUAL.
 
 [Unreleased]: https://github.com/NoureldinAmer/aloud/compare/v0.1.0...HEAD

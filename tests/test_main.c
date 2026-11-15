@@ -532,6 +532,39 @@ static void test_ui_and_golden_screens(const char *fixture_dir, const char *font
                                     TEXT_FLAG_NONE);
     CHECK(mixed_h == lh40, "mixed Latin + CJK title that fits stays on one line (%d px)", mixed_h);
 
+    /* The release zip ships only the base fonts; language packs are optional. With
+     * none installed, text_init must succeed and other scripts draw as "?". */
+    {
+        char base_dir[1024], src[1200], dst[1200];
+        snprintf(base_dir, sizeof(base_dir), "%s/tmp/fonts-base", fixture_dir);
+        mkdir(base_dir, 0755);
+        static const char *const kBase[] = { "Literata-Regular.ttf", "Literata-SemiBold.ttf",
+                                             "Inter-Regular.ttf", "Inter-SemiBold.ttf" };
+        for (size_t i = 0; i < sizeof(kBase) / sizeof(kBase[0]); i++) {
+            snprintf(src, sizeof(src), "%s/%s", font_dir, kBase[i]);
+            snprintf(dst, sizeof(dst), "%s/%s", base_dir, kBase[i]);
+            if (src[0] != '/') {
+                char cwd[512];
+                if (getcwd(cwd, sizeof(cwd))) snprintf(src, sizeof(src), "%s/%s/%s", cwd, font_dir, kBase[i]);
+            }
+            (void)unlink(dst);
+            (void)symlink(src, dst);
+        }
+        TextSystem *base = NULL;
+        CHECK(text_init(&base, base_dir) == 0 && base != NULL, "base fonts alone load (no language packs)");
+        if (base) {
+            int w_lat = text_measure_width(base, FONT_SANS_REGULAR, 40, "Résumé Ωμέγα Жизнь", TEXT_FLAG_NONE);
+            int w_cjk = text_measure_width(base, FONT_SANS_REGULAR, 40, "三体", TEXT_FLAG_NONE);
+            int w_qq = text_measure_width(base, FONT_SANS_REGULAR, 40, "??", TEXT_FLAG_NONE);
+            int w_gc = text_measure_width(base, FONT_SANS_REGULAR, 40, "ЖΩ", TEXT_FLAG_NONE);
+            CHECK(w_lat > 200 && w_gc != w_qq,
+                  "trimmed base fonts still cover Latin, Greek and Cyrillic (%d px, ЖΩ %d vs ?? %d)",
+                  w_lat, w_gc, w_qq);
+            CHECK(w_cjk == w_qq, "without the CJK pack, CJK draws as \"?\" (%d vs %d px)", w_cjk, w_qq);
+            text_free(base);
+        }
+    }
+
     char lib_dir[1024], state_dir[1024];
     snprintf(lib_dir, sizeof(lib_dir), "%s/library", fixture_dir);
     snprintf(state_dir, sizeof(state_dir), "%s/state", fixture_dir);

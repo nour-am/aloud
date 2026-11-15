@@ -53,7 +53,7 @@ FBINK_FLAGS := \
 	-DFBINK_WITH_IMAGE \
 	-DFBINK_VERSION='"886f25f-aloud"'
 
-.PHONY: all test sim showcase demo-video kindle package clean
+.PHONY: all test sim showcase demo-video kindle package fontpacks clean FORCE
 
 all: test sim kindle package
 
@@ -167,21 +167,32 @@ package: kindle
 	   third_party/fonts/Inter-Regular.ttf \
 	   third_party/fonts/Inter-SemiBold.ttf \
 	   third_party/fonts/Inter-OFL.txt \
-	   third_party/fonts/NotoNaskhArabic-Regular.ttf \
-	   third_party/fonts/NotoNaskhArabic-Bold.ttf \
-	   third_party/fonts/NotoSansArabicUI-Regular.ttf \
-	   third_party/fonts/NotoSansArabicUI-Bold.ttf \
-	   third_party/fonts/Noto-OFL.txt \
-	   third_party/fonts/NotoSansCJK-Regular.otf \
-	   third_party/fonts/NotoSansCJK-Bold.otf \
-	   third_party/fonts/NotoSansCJK-OFL.txt \
 	   build/pkg/extensions/aloud/fonts/
 	cp package/audiobooks-README.txt build/pkg/audiobooks/README.txt
 	cp LICENSE build/pkg/extensions/aloud/LICENSE.txt
 	cd build/pkg && zip -q -r -X ../../dist/aloud-$(VERSION).zip extensions audiobooks documents
 	@ls -lh dist/aloud-$(VERSION).zip
+	@$(MAKE) --no-print-directory fontpacks
+
+# Optional language font packs, unzipped onto the Kindle like the main zip. Without
+# them, characters the base fonts lack draw as "?" (src/text.c loads them if present).
+FONTPACK_arabic := NotoNaskhArabic-Regular.ttf NotoNaskhArabic-Bold.ttf \
+	NotoSansArabicUI-Regular.ttf NotoSansArabicUI-Bold.ttf Noto-OFL.txt
+FONTPACK_chinese-japanese := NotoSansCJK-Regular.otf NotoSansCJK-Bold.otf NotoSansCJK-OFL.txt
+FONTPACKS := arabic chinese-japanese
+
+fontpacks: $(foreach p,$(FONTPACKS),dist/aloud-fonts-$(p)-$(VERSION).zip)
+
+dist/aloud-fonts-%-$(VERSION).zip: FORCE
+	@mkdir -p build/fontpacks/$*/extensions/aloud/fonts dist
+	cp $(addprefix third_party/fonts/,$(FONTPACK_$*)) build/fontpacks/$*/extensions/aloud/fonts/
+	@rm -f $@
+	cd build/fontpacks/$* && zip -q -r -X ../../../$@ extensions
+	@ls -lh $@
 
 clean:
 	rm -rf build/host/test_aloud build/host/aloud-sim build/host/sonic.o \
 	       build/kindle/aloud build/kindle/aloud-sink-* build/kindle/fbink_objs \
 	       build/kindle/libtp.a build/kindle/tp.o build/pkg build/test-fixtures
+
+FORCE:
