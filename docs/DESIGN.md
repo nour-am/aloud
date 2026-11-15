@@ -1,7 +1,7 @@
 # Aloud — Product & UI design spec
 
 Status: **agreed direction, not yet implemented.** Mock-ups will be produced by the host
-simulator (`make sim`, see AGENTS.md) and committed under `docs/screens/` once the UI exists.
+simulator (`make sim`) and committed under `docs/screens/` once the UI exists.
 
 ## Product goal
 
@@ -10,7 +10,7 @@ installed like any KUAL extension, playing a user's own DRM-free audiobooks
 (M4B/M4A/MP3/OGG/Opus/FLAC) to the Kindle's audio output (Bluetooth on modern Kindles,
 headphone jack/speaker on the Kindle Touch).
 
-Ranked priorities (from the project owner):
+Ranked priorities:
 
 1. **Reliability** — never lose the listening position, never crash on odd files, always
    restore the Kindle UI on exit (even after a crash).
@@ -104,11 +104,13 @@ Top to bottom:
 | Play/pause icon toggle, time labels, scrubber | that widget only | DU (fast, B/W) or GL16 for gray text |
 | Screen-to-screen navigation | full screen | GL16/REAGL partial; flashing GC16 every 6th full repaint or when a cover is drawn |
 | Page change in a list | list area | GL16 partial |
-| Periodic progress tick while playing | time labels + scrubber | DU, **once per minute** (never per second) |
+| Periodic progress tick while playing | time labels + scrubber | DU, once per second while the Player is on screen |
 | Screen is in screensaver/off | nothing | no drawing at all |
 
-The once-per-minute tick is skipped entirely when nothing visible changed (e.g. the
-displayed minute is the same).
+The tick is skipped entirely when nothing visible changed (the displayed second and the
+sleep-timer minute are the same). It was once per minute until device feedback showed a
+stalled-looking clock reads as a frozen player; it never runs while paused, in the
+screensaver, or in the background.
 
 ## Content layout on the Kindle
 

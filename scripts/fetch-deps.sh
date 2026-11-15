@@ -81,3 +81,27 @@ if [ ! -f "$TP/fonts/Inter-Regular.ttf" ] || [ ! -f "$TP/fonts/Inter-SemiBold.tt
 fi
 echo "inter @ $INTER_VERSION"
 
+
+# Noto Naskh Arabic (serif) + Noto Sans Arabic UI: glyph fallback so Arabic titles
+# and chapter names render (src/text.c shapes and reorders them). Unhinted TTFs from
+# the Noto project's published font tree, pinned by commit and checked by SHA-256.
+NOTO_REV=cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c
+NOTO_ARABIC_REV=f1ba474be91d6a5d2cfcc4374bb03cc5f1011088
+noto_get() { # file url sha256
+  if [ ! -f "$TP/fonts/$1" ] || ! echo "$3  $TP/fonts/$1" | shasum -a 256 -c - >/dev/null 2>&1; then
+    curl -fL --retry 5 --retry-all-errors --connect-timeout 30 -o "$TP/fonts/$1" "$2"
+    echo "$3  $TP/fonts/$1" | shasum -a 256 -c -
+  fi
+}
+NOTO_BASE="https://raw.githubusercontent.com/notofonts/notofonts.github.io/$NOTO_REV/fonts"
+noto_get NotoNaskhArabic-Regular.ttf "$NOTO_BASE/NotoNaskhArabic/unhinted/ttf/NotoNaskhArabic-Regular.ttf" \
+  c34fdbd98af4dbc45ca192a23d2eeb77032add83086f5fe32957d23b3f36b221
+noto_get NotoNaskhArabic-Bold.ttf "$NOTO_BASE/NotoNaskhArabic/unhinted/ttf/NotoNaskhArabic-Bold.ttf" \
+  380ac34b249d336e1a43c21053df440594e1e3db8f75fabd4d85b649ca1ea4c6
+noto_get NotoSansArabicUI-Regular.ttf "$NOTO_BASE/NotoSansArabicUI/unhinted/ttf/NotoSansArabicUI-Regular.ttf" \
+  f4fe1866a64cba1e8b8d08a67cd29070f919edf778ca5de983c1f2a690fc953b
+noto_get NotoSansArabicUI-Bold.ttf "$NOTO_BASE/NotoSansArabicUI/unhinted/ttf/NotoSansArabicUI-Bold.ttf" \
+  efb903b545a00a557c9d2dd739725157c04bf44215ba31b8ca3a805f099fdc33
+noto_get Noto-OFL.txt "https://raw.githubusercontent.com/notofonts/arabic/$NOTO_ARABIC_REV/OFL.txt" \
+  a7a5a25eb188bf1cd96982030d53e23c33485c69b1044a562254226857ee13af
+echo "noto arabic @ ${NOTO_REV%"${NOTO_REV#???????}"}"

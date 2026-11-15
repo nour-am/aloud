@@ -702,7 +702,7 @@ int main(int argc, char **argv) {
 
     if (export_screens_dir) {
         /* Export PW5 portrait (1236x1648 @ 300), KT4 portrait (600x800 @ 167),
-         * and PW5 landscape (1648x1236 @ 300) per AGENTS.md Roadmap Step 3. */
+         * and PW5 landscape (1648x1236 @ 300) for the README and docs. */
         int rc = export_profile_screens("pw5", 1236, 1648, 300,
                                         library_dir, state_dir, font_dir, export_screens_dir);
         if (rc == 0) {

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/NoureldinAmer/aloud/discussions
+    about: Ask how to do something, or share an idea before it becomes a feature request.
+  - name: Jailbreak help
+    url: https://kindlemodding.org
+    about: Aloud needs a jailbroken Kindle. Jailbreak and hotfix guides live here.

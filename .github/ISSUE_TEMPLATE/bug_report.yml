@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in Aloud doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time. A clear report with steps is the fastest way to a fix.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Aloud
+        2. Play a book
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Kindle model
+      placeholder: Paperwhite 5 (11th gen)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      description: Settings → Device Options → Device Info.
+      placeholder: 5.19.2
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Aloud version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: audio
+    attributes:
+      label: Audio output
+      options:
+        - Bluetooth headphones or speaker
+        - Kindle Touch headphone jack or speaker
+        - Not relevant
+    validations:
+      required: true
+  - type: textarea
+    id: book
+    attributes:
+      label: The audiobook
+      description: If the problem is with one book, say its format (M4B, MP3 folder, ...), length, and where it came from. Please don't attach copyrighted audio.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Attach `/mnt/us/extensions/aloud/state/aloud.log` if it exists. Read it first and remove anything personal, such as book titles you'd rather not share.

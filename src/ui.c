@@ -1242,7 +1242,7 @@ static void render_chapters_screen(Ui *ui) {
         text_draw_line(ui->text, c, is_current ? FONT_SANS_BOLD : FONT_SANS_REGULAR,
                        row_px, tx, ty, tw, ch->title, TONE_BLACK, TEXT_ALIGN_LEFT);
 
-        /* Where the chapter starts in the book (owner's request); with hours on every
+        /* Where the chapter starts in the book; with hours on every
          * row once the book passes an hour, so the column stays aligned. */
         char dur_str[32];
         ui_format_timestamp_ms(ch->start_book_ms, b->total_duration_ms >= 3600000LL,

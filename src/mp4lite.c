@@ -182,7 +182,7 @@ static int parse_stsd(Mp4Lite *m, const Box *stsd, Mp4LiteInfo *info) {
     info->sample_rate = (int)(be32(e + 32) >> 16);
     size_t child = 36;
     if (version == 1) child += 16;
-    else if (version != 0) goto out; /* v2 (QuickTime LPCM-style) is not AAC from libro */
+    else if (version != 0) goto out; /* v2 (QuickTime LPCM-style) is not the AAC layout handled here */
     /* Children: esds directly, or inside a QuickTime `wave` box. */
     for (int depth = 0; depth < 2; depth++) {
         size_t limit = elen;

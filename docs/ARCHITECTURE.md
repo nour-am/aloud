@@ -11,7 +11,7 @@ the same information. Facts about the Kindle platform (with sources) live in
 **Why:** lowest CPU, memory and startup cost on 256–512 MB, 1 GHz single/dual-core
 Kindles; no interpreter to ship; direct access to the framebuffer, evdev and ALSA.
 
-**Rejected:** KOReader plugin (not standalone — owner requirement); GTK2 app on the stock
+**Rejected:** KOReader plugin (not standalone — a project requirement); GTK2 app on the stock
 X server (less control over e-ink refresh = more refreshes, and depends on firmware libs);
 HTML "illusion"/WAF app (no reliable audio API in the Kindle browser engine).
 
@@ -167,11 +167,11 @@ frontlight on and reportedly swallows short power-button presses. Aloud instead:
 ~5 s), so pause now ends the stream like a seek does: our PCM fd is `dup2`'d to
 `/dev/null` (helper gets EOF, can't block in `NULL`), `STOP` is sent, and resume starts a
 fresh helper (it rewinds 2 s anyway). Helpers must run from `/mnt/us`: a `/var/tmp` copy
-died at start-up on the owner's Kindle. If the helper dies at start-up, its exit status is
+died at start-up on the test Kindle. If the helper dies at start-up, its exit status is
 logged and Aloud retries with firmware `gst-launch` for the session. (The `New clock:
 GstSystemClock` lines in `aloud.log` come from the firmware GStreamer, not a fallback.)
 
-**Pause, seek and latency (owner feedback, 2026-11-03).** `mixersink` hands PCM to the
+**Pause, seek and latency (2026-11-03).** `mixersink` hands PCM to the
 Lab126 mixer daemon, which buffers seconds of audio beyond anything Aloud controls, so
 draining our FIFO alone left a ~5 s pause delay. Pause therefore sets the helper's
 pipeline to `PAUSED` (PLAYING↔PAUSED never needs filesrc's stream lock; this is how
@@ -270,7 +270,7 @@ by saving state and exiting cleanly.
 
 ## D13. Background playback: keep listening while reading in the stock reader
 
-**Goal (owner, 2026-11-03):** listen while reading, without making the Kindle lag and
+**Goal (2026-11-03):** listen while reading, without making the Kindle lag and
 without any way to leave it in a broken state. Controls while reading are allowed only if
 they cost nothing.
 
@@ -305,7 +305,7 @@ through an O_RDWR descriptor so the write can never raise SIGPIPE in KOReader, w
 doesn't ignore it. It then shows `/var/tmp/aloud.state` ("playing|paused, chapter,
 book"), which aloud rewrites in RAM only when it changes. No timers on either side.
 Rejected: listening to the touchscreen ungrabbed for a gesture (wakes on every tap,
-collides with the reader's own gestures) — exactly the lag the owner ruled out.
+collides with the reader's own gestures) — exactly the lag ruled out by design.
 
 **Safety rules.**
 - Launcher cleanup repaints the saved screen only if Aloud is in front; in the background
@@ -329,7 +329,7 @@ suite; on-device checks in DEVICE-TESTING.md Phase 5.
 
 libavformat's mov demuxer keeps an `AVIndexEntry` (24 B) and, since FFmpeg 7.1, a
 per-sample `MOVTimeToSample` (12 B) for **every** audio frame while the file is open, and
-builds a second index while applying the edit list. Measured on the owner's 8.6 h M4B
+builds a second index while applying the edit list. Measured on a reference 8.6 h M4B
 (1.33 M AAC frames): **113 MB peak**, ~90 MB held — a fifth of a PW5's RAM, which
 background playback would hold while the stock reader runs.
 

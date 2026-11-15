@@ -1,0 +1,46 @@
+name: Device report
+description: Tell us how Aloud runs on your Kindle model, working or not.
+title: "Device report: <model>, FW <version>"
+labels: [device-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports from models we haven't tested are the most useful thing you can send. Run **KUAL → Aloud Audiobook Player → Save Device Diagnostics**, plug the Kindle in, and attach `aloud-diagnose.txt` from the USB drive. It masks your serial number and Bluetooth addresses, but read it before you post it.
+  - type: input
+    id: model
+    attributes:
+      label: Kindle model
+      placeholder: Oasis 3 (10th gen)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      placeholder: 5.16.21
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Aloud version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works?
+      options:
+        - label: Aloud opens from the Kindle library
+        - label: Aloud opens from KUAL
+        - label: Audio plays
+        - label: Pause, skip and seek respond quickly
+        - label: Play in background works while reading
+        - label: The Kindle's normal screen comes back after exiting Aloud
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything odd, slow or broken. Attach `aloud-diagnose.txt` here.

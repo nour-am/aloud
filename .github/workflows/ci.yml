@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg clang llvm nasm zip
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Cache pinned dependencies and FFmpeg builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party
+            build/host/ffmpeg
+            build/kindle/ffmpeg
+          key: deps-${{ runner.os }}-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-ffmpeg.sh', 'tools/arm-*') }}
+
+      - name: Fetch dependencies
+        run: ./scripts/fetch-deps.sh
+
+      - name: Build FFmpeg
+        run: |
+          [ -f build/host/ffmpeg/lib/libavcodec.a ] || ./scripts/build-ffmpeg.sh host
+          [ -f build/kindle/ffmpeg/lib/libavcodec.a ] || ./scripts/build-ffmpeg.sh kindle
+
+      - name: Test
+        run: make test
+
+      - name: Build Kindle package
+        run: make package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aloud-kindle-zip
+          path: dist/*.zip
+          if-no-files-found: error

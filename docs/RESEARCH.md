@@ -382,7 +382,7 @@ page before relying on an exact quote.
 6. Which `mixersink` formats work besides 44.1 kHz stereo S16LE.
 7. On Broadcom models, whether BT audio survives the screensaver at all.
 
-## 7. Local dev environment (verified on the owner's Mac)
+## 7. Local dev environment (reference build machine)
 
 - macOS 15.2, Apple Silicon, Xcode clang 16, no Docker.
 - `brew install zig` → Zig 0.17.0. `zig cc -target arm-linux-musleabihf -mcpu=cortex_a8 -static`
@@ -393,4 +393,5 @@ page before relying on an exact quote.
 - Xcode provides `llvm-nm` (`xcrun -f llvm-nm`), passed to FFmpeg's configure.
 - ARM binaries cannot be executed on macOS (no qemu-user). Options if needed later:
   `brew install lima` + an Ubuntu VM with `qemu-user-static`.
-- `gh` is installed but not logged in (no GitHub remote created yet).
+- Publishing is via GitHub Releases with a MobileRead announcement; see
+  `docs/RELEASING.md`.

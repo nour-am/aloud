@@ -2,7 +2,7 @@
 # Name: Aloud Audio Test
 # Author: Aloud
 #
-# On-device hardware verification scriptlet (AGENTS.md Roadmap Step 1).
+# On-device hardware verification scriptlet (docs/DEVICE-TESTING.md).
 # Plays a 440 Hz tone for 15 seconds through the Kindle audio backend (ALSA on
 # Kindle Touch, GStreamer mixersink on Bluetooth Kindles) while listening for
 # powerd events and answering readyToSuspend with deferSuspend.

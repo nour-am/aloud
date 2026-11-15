@@ -34,7 +34,7 @@ kindle)
   "$SRC/configure" $COMMON \
     --enable-cross-compile --target-os=linux --arch=arm --cpu=cortex-a8 \
     --cc="$ROOT/tools/arm-cc" --ar="$ROOT/tools/arm-ar" --ranlib="$ROOT/tools/arm-ranlib" \
-    --nm="$(xcrun -f llvm-nm 2>/dev/null || echo nm)" \
+    --nm="$(xcrun -f llvm-nm 2>/dev/null || command -v llvm-nm || echo nm)" \
     --enable-neon --enable-vfp --enable-armv6 --enable-armv6t2 --enable-thumb \
     --extra-cflags="-O2 -ffunction-sections -fdata-sections" \
     --pkg-config=false

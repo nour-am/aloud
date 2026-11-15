@@ -53,7 +53,7 @@ FBINK_FLAGS := \
 	-DFBINK_WITH_IMAGE \
 	-DFBINK_VERSION='"886f25f-aloud"'
 
-.PHONY: all test sim kindle package clean
+.PHONY: all test sim showcase kindle package clean
 
 all: test sim kindle package
 
@@ -94,6 +94,10 @@ sim: build/host/aloud-sim
 	cp tests/golden/pw5_sheet_sleep.png docs/screens/sheet_sleep.png
 	cp tests/golden/pw5_landscape_player.png docs/screens/player_landscape.png
 	cp tests/golden/kt4_player.png docs/screens/player_kt4.png
+
+# README images (docs/media/): multilingual demo library rendered by the simulator.
+showcase: build/host/aloud-sim
+	./tools/make-showcase.sh
 
 build/kindle/tp.o: third_party/sonic/sonic.c $(FBINK_SRCS)
 	@mkdir -p build/kindle/fbink_objs
@@ -136,7 +140,10 @@ package: kindle
 	@mkdir -p build/pkg/extensions/aloud/bin \
 		build/pkg/extensions/aloud/fonts \
 		build/pkg/audiobooks \
+		build/pkg/documents \
 		dist
+	cp package/scriptlet.sh build/pkg/documents/Aloud.sh
+	chmod +x build/pkg/documents/Aloud.sh
 	cp package/config.xml build/pkg/extensions/aloud/config.xml
 	cp package/menu.json build/pkg/extensions/aloud/menu.json
 	cp package/launcher.sh build/pkg/extensions/aloud/aloud.sh
@@ -164,7 +171,7 @@ package: kindle
 	   build/pkg/extensions/aloud/fonts/
 	cp package/audiobooks-README.txt build/pkg/audiobooks/README.txt
 	cp LICENSE build/pkg/extensions/aloud/LICENSE.txt
-	cd build/pkg && zip -q -r ../../dist/aloud-$(VERSION).zip extensions audiobooks
+	cd build/pkg && zip -q -r -X ../../dist/aloud-$(VERSION).zip extensions audiobooks documents
 	@ls -lh dist/aloud-$(VERSION).zip
 
 clean:

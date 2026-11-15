@@ -8,3 +8,11 @@
 *.o
 *.a
 .DS_Store
+# AI coding-agent instructions and tool state (kept locally, not part of the project)
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.claude/
+/.gemini/
+/.codex/
+/.cursor/
