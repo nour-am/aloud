@@ -40,12 +40,13 @@ Aloud turns a jailbroken Kindle into an audiobook player. Copy your DRM-free `.m
 ## See it in action
 
 <p align="center">
-  <a href="./docs/media/demo.mp4"><img src="./docs/media/demo-poster.png" width="360" alt="Play the 36-second demo video with sound" /></a>
-  &nbsp;&nbsp;
+  https://github.com/user-attachments/assets/4f05b56b-e85a-4ad6-b330-8f1196b8b5f3
+
+  
+
+
   <img src="./docs/media/languages.gif" width="300" alt="The Aloud player cycling through audiobooks in English, Japanese, Spanish, Chinese and Arabic" />
 </p>
-
-<p align="center"><sub>▶ Click the left image for the 36-second demo with sound. It's the real app running in its simulator, playing a public-domain <a href="https://librivox.org">LibriVox</a> recording.</sub></p>
 
 ## Light on your Kindle
 
