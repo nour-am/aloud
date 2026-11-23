@@ -4,7 +4,7 @@ Aloud ships in two places:
 
 | Where | What | Why |
 |---|---|---|
-| [GitHub Releases](https://github.com/NoureldinAmer/aloud/releases) | The install zip + `SHA256SUMS.txt` | Canonical download, built by CI from a tag |
+| [GitHub Releases](https://github.com/nour-am/aloud/releases) | The install zip + `SHA256SUMS.txt` | Canonical download, built by CI from a tag |
 | [MobileRead, Kindle Developer's Corner](https://www.mobileread.com/forums/forumdisplay.php?f=150) | One announcement thread, updated each release | Where Kindle modders look for new apps |
 
 Link to [kindlemodding.org](https://kindlemodding.org) for jailbreak, hotfix and KUAL

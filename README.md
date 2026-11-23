@@ -7,7 +7,7 @@
 <p align="center">An audiobook player for jailbroken Kindles.</p>
 
 <p align="center">
-  <a href="https://github.com/NoureldinAmer/aloud/releases/latest"><strong>Download</strong></a> ·
+  <a href="https://github.com/nour-am/aloud/releases/latest"><strong>Download</strong></a> ·
   <a href="#install">Install</a> ·
   <a href="#features">Features</a> ·
   <a href="./docs/DEVICE-TESTING.md">Troubleshooting</a> ·
@@ -15,8 +15,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/NoureldinAmer/aloud/releases/latest"><img src="https://img.shields.io/github/v/release/NoureldinAmer/aloud?label=release&color=111" alt="Latest release" /></a>
-  <a href="https://github.com/NoureldinAmer/aloud/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/NoureldinAmer/aloud/ci.yml?branch=main&label=tests" alt="Tests" /></a>
+  <a href="https://github.com/nour-am/aloud/releases/latest"><img src="https://img.shields.io/github/v/release/nour-am/aloud?label=release&color=111" alt="Latest release" /></a>
+  <a href="https://github.com/nour-am/aloud/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nour-am/aloud/ci.yml?branch=main&label=tests" alt="Tests" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-111" alt="GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/Kindle-FW%205.x-111" alt="Kindle firmware 5.x" />
 </p>
@@ -70,7 +70,7 @@ https://github.com/user-attachments/assets/4f05b56b-e85a-4ad6-b330-8f1196b8b5f3
 
 Needs a **jailbroken Kindle on firmware 5.x** with the hotfix ([how to jailbreak](https://kindlemodding.org)).
 
-1. Download the zip from [Releases](https://github.com/NoureldinAmer/aloud/releases/latest).
+1. Download the zip from [Releases](https://github.com/nour-am/aloud/releases/latest).
 2. Unzip it onto the Kindle's USB drive.
 3. Put your audiobooks in the new `audiobooks/` folder.
 4. Eject and tap **Aloud** in your library.
@@ -85,7 +85,7 @@ KUAL is optional. Using KOReader? Copy `extensions/aloud/koreader/aloud.koplugin
 | Kindle | Audio | Status |
 | --- | --- | --- |
 | Paperwhite 5 | Bluetooth | ✅ Tested (FW 5.19.2) |
-| Kindle 8th gen+, Paperwhite 4 & 6, Oasis, Scribe, Colorsoft | Bluetooth | Should work, please [report](https://github.com/NoureldinAmer/aloud/issues/new?template=device_report.yml) |
+| Kindle 8th gen+, Paperwhite 4 & 6, Oasis, Scribe, Colorsoft | Bluetooth | Should work, please [report](https://github.com/nour-am/aloud/issues/new?template=device_report.yml) |
 | Kindle Touch | Jack, speaker | Should work, please report |
 | Paperwhite 1–3, Voyage, Kindle 7th gen | — | No audio hardware |
 
@@ -97,7 +97,7 @@ KUAL is optional. Using KOReader? Copy `extensions/aloud/koreader/aloud.koplugin
 screen on exit. To remove it, delete `extensions/aloud/` and `documents/Aloud.sh`.
 
 **Something's wrong.** Run **KUAL → Aloud Audiobook Player → Save Device Diagnostics** and
-attach `aloud-diagnose.txt` to a [device report](https://github.com/NoureldinAmer/aloud/issues/new?template=device_report.yml).
+attach `aloud-diagnose.txt` to a [device report](https://github.com/nour-am/aloud/issues/new?template=device_report.yml).
 
 ## Build from source
 
@@ -119,7 +119,7 @@ README's images and video. Design notes: [ARCHITECTURE.md](./docs/ARCHITECTURE.m
 ## Contributing
 
 Issues, device reports and pull requests are welcome; see [CONTRIBUTING.md](./CONTRIBUTING.md).
-Questions and ideas go in [Discussions](https://github.com/NoureldinAmer/aloud/discussions).
+Questions and ideas go in [Discussions](https://github.com/nour-am/aloud/discussions).
 
 ## License
 

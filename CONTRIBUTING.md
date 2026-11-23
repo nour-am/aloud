@@ -6,11 +6,11 @@ and the most likely to be merged.
 ## Ways to help
 
 - **Device reports.** Aloud is tested on a Paperwhite 5. If you have another Kindle, a
-  [device report](https://github.com/NoureldinAmer/aloud/issues/new?template=device_report.yml)
+  [device report](https://github.com/nour-am/aloud/issues/new?template=device_report.yml)
   tells us what works on it, even if everything does.
-- **Bug reports.** Use the [bug template](https://github.com/NoureldinAmer/aloud/issues/new?template=bug_report.yml)
+- **Bug reports.** Use the [bug template](https://github.com/nour-am/aloud/issues/new?template=bug_report.yml)
   and include your model, firmware and steps to reproduce.
-- **Ideas.** Start in [Discussions](https://github.com/NoureldinAmer/aloud/discussions)
+- **Ideas.** Start in [Discussions](https://github.com/nour-am/aloud/discussions)
   before opening a feature request, so we can agree on the shape first.
 - **Code and docs.** Pick an issue labelled `good first issue` or `help wanted`, or fix
   something that bothers you. For anything larger than a bug fix, open an issue first.

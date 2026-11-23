@@ -25,5 +25,5 @@ First public release.
   Chinese/Japanese font packs.
 - On-device diagnostics, audio test and performance measurement from KUAL.
 
-[Unreleased]: https://github.com/NoureldinAmer/aloud/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/NoureldinAmer/aloud/releases/tag/v0.1.0
+[Unreleased]: https://github.com/nour-am/aloud/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nour-am/aloud/releases/tag/v0.1.0

@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question or idea
-    url: https://github.com/NoureldinAmer/aloud/discussions
+    url: https://github.com/nour-am/aloud/discussions
     about: Ask how to do something, or share an idea before it becomes a feature request.
   - name: Jailbreak help
     url: https://kindlemodding.org

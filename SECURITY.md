@@ -4,7 +4,7 @@ Aloud runs as root on a jailbroken Kindle, so bugs that let a crafted audiobook 
 folder name run code, write outside Aloud's folders, or brick the device matter.
 
 Please report them privately through
-[GitHub's private vulnerability reporting](https://github.com/NoureldinAmer/aloud/security/advisories/new),
+[GitHub's private vulnerability reporting](https://github.com/nour-am/aloud/security/advisories/new),
 not in a public issue. Include the Kindle model, firmware, Aloud version, and a sample file
 or steps if you can.
 
